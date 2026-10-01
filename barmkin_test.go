@@ -249,6 +249,7 @@ func TestEngine_EvaluateFileTools_ScanPathAndPayload(t *testing.T) {
 		{"claude Edit new_string", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/tmp/x", "old_string": "a", "new_string": "token=ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII"}}, "github-token"},
 		{"claude Write sensitive path", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/home/u/.ssh/id_rsa", "content": "harmless"}}, "ssh-private-key-path"},
 		{"copilot edit new_str", map[string]any{"toolName": "edit", "toolArgs": `{"path":"/tmp/x","old_str":"a","new_str":"-----BEGIN OPENSSH PRIVATE KEY-----"}`}, "private-key-block"},
+		{"claude MultiEdit new_string", map[string]any{"tool_name": "MultiEdit", "tool_input": map[string]any{"file_path": "/tmp/x", "edits": []any{map[string]any{"old_string": "a", "new_string": "-----BEGIN EC PRIVATE KEY-----"}}}}, "private-key-block"},
 		{"claude Write benign", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/notes.md", "content": "hello"}}, ""},
 	}
 	for _, tc := range cases {
@@ -259,6 +260,36 @@ func TestEngine_EvaluateFileTools_ScanPathAndPayload(t *testing.T) {
 				t.Errorf("got %+v, want rule %q", r, tc.want)
 			}
 		})
+	}
+}
+
+func TestEngine_EvaluateSearchTools_PatternNotScanned(t *testing.T) {
+	e := newEngine(&Config{Rules: mustRules(t,
+		[2]string{"rm-rf-force", `rm\s+-rf\b`},
+		[2]string{"drop-table", `(?i)DROP\s+TABLE`},
+		[2]string{"dotenv-path", `^[^\s]*\.env$`},
+	)})
+	cases := []map[string]any{
+		{"tool_name": "Grep", "tool_input": map[string]any{"pattern": "rm -rf", "path": "."}},
+		{"tool_name": "Grep", "tool_input": map[string]any{"pattern": "DROP TABLE", "path": "."}},
+		{"tool_name": "Glob", "tool_input": map[string]any{"pattern": "**/.env"}},
+	}
+	for _, in := range cases {
+		input, _ := json.Marshal(in)
+		if r := e.evaluate(input); r.Decision != "allow" {
+			t.Errorf("%v: got %+v, want allow", in, r)
+		}
+	}
+	writes := []map[string]any{
+		{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/s.sh", "content": "rm -rf /"}},
+		{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/tmp/q.sql", "old_string": "a", "new_string": "DROP TABLE users"}},
+		{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/app/.env", "content": "x"}},
+	}
+	for _, in := range writes {
+		input, _ := json.Marshal(in)
+		if r := e.evaluate(input); r.Decision != "deny" {
+			t.Errorf("%v: got %+v, want deny", in, r)
+		}
 	}
 }
 

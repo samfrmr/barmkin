@@ -137,27 +137,50 @@ func (r *Request) extractContent() string {
 	return strings.TrimSpace(string(r.ToolInput))
 }
 
+// fileMutatingTools are the (lowercased) Claude Code and Copilot CLI
+// tools whose individual fields are scanned. Read-only tools (Grep,
+// Glob, Read, ...) are scanned on extractContent alone, so a search
+// pattern is never treated as a payload.
+var fileMutatingTools = map[string]bool{
+	"write": true, "edit": true, "multiedit": true, "notebookedit": true,
+	"create": true,
+}
+
 // fileToolFields are the tool_input/toolArgs keys whose values are
-// each scanned on their own, so a Write/Edit is checked on both its
-// target path and its payload.
+// each scanned on their own, so a file-mutating tool is checked on
+// both its target path and its payload.
 var fileToolFields = []string{
-	"command", "path", "filePath", "file_path", "url", "content",
-	"old_string", "new_string", "file_text", "old_str", "new_str",
-	"pattern", "patch_text",
+	"path", "filePath", "file_path", "notebook_path", "content",
+	"old_string", "new_string", "new_source", "file_text", "old_str",
+	"new_str",
 }
 
 // scanTargets returns every string the regex rules are matched
-// against: the primary extractContent value plus each present
-// fileToolFields value from Claude Code's tool_input and Copilot
-// CLI's toolArgs. Path rules anchored with ^...$ still see the bare
-// path, while content rules also see the written payload.
+// against: the primary extractContent value plus, for file-mutating
+// tools, each present fileToolFields value from Claude Code's
+// tool_input, Copilot CLI's toolArgs, and MultiEdit's edits. Path
+// rules anchored with ^...$ still see the bare path, while content
+// rules also see the written payload.
 func (r *Request) scanTargets() []string {
 	targets := []string{r.extractContent()}
+	if !fileMutatingTools[r.Tool] {
+		return targets
+	}
 	for _, raw := range []json.RawMessage{r.ToolInput, r.ToolArgsCamel} {
 		m := decodeObject(raw)
-		for _, k := range fileToolFields {
-			if s, ok := m[k].(string); ok && s != "" {
-				targets = append(targets, s)
+		objs := []map[string]any{m}
+		if edits, ok := m["edits"].([]any); ok {
+			for _, e := range edits {
+				if em, ok := e.(map[string]any); ok {
+					objs = append(objs, em)
+				}
+			}
+		}
+		for _, o := range objs {
+			for _, k := range fileToolFields {
+				if s, ok := o[k].(string); ok && s != "" {
+					targets = append(targets, s)
+				}
 			}
 		}
 	}
