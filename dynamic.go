@@ -168,8 +168,16 @@ func runDynamic(cfg Dynamic, req Request, content string) *dynamicResult {
 		if cerr != nil {
 			jerr = cerr
 		} else {
+			cmdText := truncate(content, 4000)
+			if cfg.Provider.Redact != "off" {
+				// Redact by default; "off" is an explicit opt-out for
+				// deployments where this never leaves the corporate
+				// boundary (e.g. an internal gateway in front of a
+				// self-hosted model) - see demo/README.md.
+				cmdText = redact(cmdText)
+			}
 			state := map[string]string{
-				"command": redact(truncate(content, 4000)),
+				"command": cmdText,
 				"cwd":     req.Cwd,
 			}
 			questions := make(map[string]jevQuestion, len(defaultQuestions))

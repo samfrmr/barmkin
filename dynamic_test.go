@@ -421,6 +421,98 @@ func TestJevClient_KeyFileWrongPermissions(t *testing.T) {
 	}
 }
 
+// ── auth.type: command / none (Tier A credential model) ───────────────────
+
+func TestResolveJevKey_Command(t *testing.T) {
+	key, err := resolveJevKey(DynamicAuth{Type: "command", Command: []string{"printf", "corp-token-abc"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != "corp-token-abc" {
+		t.Errorf("got %q, want corp-token-abc", key)
+	}
+}
+
+func TestResolveJevKey_CommandFailureIsNoKey(t *testing.T) {
+	_, err := resolveJevKey(DynamicAuth{Type: "command", Command: []string{"/nonexistent/corp-token-broker"}})
+	if errKind(err) != "no_key" {
+		t.Errorf("got %v, want no_key", err)
+	}
+}
+
+func TestResolveJevKey_CommandEmptyOutputIsNoKey(t *testing.T) {
+	_, err := resolveJevKey(DynamicAuth{Type: "command", Command: []string{"printf", ""}})
+	if errKind(err) != "no_key" {
+		t.Errorf("got %v, want no_key", err)
+	}
+}
+
+func TestResolveJevKey_CommandUnset(t *testing.T) {
+	_, err := resolveJevKey(DynamicAuth{Type: "command"})
+	if errKind(err) != "no_key" {
+		t.Errorf("got %v, want no_key", err)
+	}
+}
+
+func TestResolveJevKey_NoneHasNoKeyAndNoError(t *testing.T) {
+	// "none": the gateway authenticates the caller (workload
+	// identity), so there is deliberately no credential to resolve.
+	key, err := resolveJevKey(DynamicAuth{Type: "none"})
+	if err != nil || key != "" {
+		t.Errorf("got key=%q err=%v, want empty key, no error", key, err)
+	}
+}
+
+// ── provider.redact: default | off ─────────────────────────────────────
+
+func TestRunDynamic_RedactOffSendsRawCommand(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9})
+	}))
+	defer srv.Close()
+
+	cfg := Dynamic{
+		Enabled: true, Mode: "enforce", OnUnavailable: "escalate",
+		Provider: DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "none"}, TimeoutMs: 500, Redact: "off"},
+	}
+	runDynamic(cfg, Request{Tool: "bash", TrajectoryID: "redact-off-sess"}, "export FOO_KEY=plaintext-marker-xyz")
+
+	if !bytes.Contains(gotBody, []byte("plaintext-marker-xyz")) {
+		t.Errorf("redact: off should send the raw command unmasked; got %s", gotBody)
+	}
+}
+
+func TestRunDynamic_RedactDefaultMasksSecrets(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9})
+	}))
+	defer srv.Close()
+
+	// Zero-value Redact ("") must behave like "default" (redact),
+	// not like "off" - only the literal "off" may disable it.
+	cfg := Dynamic{
+		Enabled: true, Mode: "enforce", OnUnavailable: "escalate",
+		Provider: DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "none"}, TimeoutMs: 500},
+	}
+	runDynamic(cfg, Request{Tool: "bash", TrajectoryID: "redact-default-sess"}, "export FOO_KEY=plaintext-marker-xyz")
+
+	if bytes.Contains(gotBody, []byte("plaintext-marker-xyz")) {
+		t.Errorf("redact default (zero value) should mask the secret; got %s", gotBody)
+	}
+}
+
+func TestDynamicApplyDefaults_RedactDefaultsToOn(t *testing.T) {
+	d := Dynamic{Enabled: true}
+	d.applyDefaults()
+	if d.Provider.Redact != "default" {
+		t.Errorf("got %q, want \"default\"", d.Provider.Redact)
+	}
+}
+
 func TestJevClient_HTTPErrors(t *testing.T) {
 	for _, code := range []int{400, 401, 403, 422, 429, 529, 500} {
 		t.Run(fmt.Sprintf("http_%d", code), func(t *testing.T) {
