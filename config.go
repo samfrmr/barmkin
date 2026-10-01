@@ -221,7 +221,19 @@ func loadConfig(path string) (*Config, error) {
 		}
 	}
 	cfg.Dynamic.applyDefaults()
+	applyDynamicKillSwitch(&cfg.Dynamic)
 	return &cfg, nil
+}
+
+// applyDynamicKillSwitch implements D7: BARMKIN_DYNAMIC=off can only
+// turn the dynamic layer off, never on. Any other value (including
+// "on") is ignored, so a config that doesn't enable the layer can't be
+// enabled by environment alone - only /etc/barmkin/rules.yaml can do
+// that (report.md §5b).
+func applyDynamicKillSwitch(d *Dynamic) {
+	if os.Getenv("BARMKIN_DYNAMIC") == "off" {
+		d.Enabled = false
+	}
 }
 
 // otelStatus returns a human-readable OTel status string for `barmkin validate`.

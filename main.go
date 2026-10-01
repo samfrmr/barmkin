@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"time"
@@ -124,18 +125,40 @@ func cmdEval(configPath string) {
 	defer engine.close()
 	result := engine.evaluate(data)
 
+	isCopilotCLI := result.AgentID == "copilot-cli"
+
 	switch result.Decision {
 	case "deny":
 		msg := result.Reason
 		if msg == "" {
 			msg = fmt.Sprintf("blocked by rule: %s", result.Rule)
 		}
-		fmt.Fprintf(os.Stderr, "[barmkin] %s\n", msg)
+		if isCopilotCLI {
+			// Always emit explicit JSON rather than relying on stderr,
+			// since it's undocumented whether this harness surfaces
+			// stderr (vs. stdout) as the deny reason (report.md §5c).
+			fmt.Println(renderCopilotCLIOutput("deny", msg))
+		} else {
+			fmt.Fprintf(os.Stderr, "[barmkin] %s\n", msg)
+		}
 		os.Exit(2)
 	case "escalate":
-		// Forces a Claude Code permission prompt even in auto mode
-		// (>= v2.1.211). Exit 0: this is not a deny.
-		fmt.Println(renderEscalateJSON(result.Reason))
+		if isCopilotCLI {
+			// Confirmed honoured from Copilot CLI >= 1.0.66 (report.md §5c).
+			fmt.Println(renderCopilotCLIOutput("ask", result.Reason))
+		} else {
+			// Forces a Claude Code permission prompt even in auto mode
+			// (>= v2.1.211). Exit 0: this is not a deny.
+			fmt.Println(renderEscalateJSON(result.Reason))
+		}
+	case "allow":
+		if isCopilotCLI {
+			// No documented silent-exit-0-means-pass convention on this
+			// harness; always emit explicit allow (report.md §5c
+			// recommendation).
+			fmt.Println(renderCopilotCLIOutput("allow", ""))
+		}
+		// Claude Code / opencode: silent exit 0, unchanged.
 	}
 }
 
@@ -186,6 +209,9 @@ func cmdValidate(configPath string) {
 	fmt.Printf("\notel:    %s\n", otelStatus(cfg.OTel))
 	fmt.Printf("log:     %s\n", logStatus(cfg.Log))
 	fmt.Printf("dynamic: %s\n", dynamicStatus(cfg.Dynamic))
+	if os.Getenv("BARMKIN_DYNAMIC") == "off" {
+		fmt.Println("  (forced off by BARMKIN_DYNAMIC=off)")
+	}
 	if cfg.Dynamic.Enabled {
 		validateDynamicAuth(cfg.Dynamic.Provider.Auth)
 	}
@@ -261,8 +287,101 @@ func cmdTest(configPath string) {
 	}
 }
 
+// statsSummary is the aggregated result of scanning the audit log.
+// decision="allow" is Barmkin's wire value for Decision.Pass (see
+// decision.go); escalate is counted separately rather than folded into
+// allow (report.md §5f: "barmkin stats: count escalate separately...
+// and stop counting non-deny as allow", the pre-existing main.go:285-91
+// miscount this fixes).
+type statsSummary struct {
+	Events, Allows, Escalates, Denies int
+	Hits                              map[string]int
+	DynamicEvents, DynamicUnavailable int
+	DynamicOutcomes                   map[string]int
+	LatencyP50, LatencyP95            float64
+	HasLatency                        bool
+}
+
+// computeStats scans the JSON-lines audit log at path and aggregates
+// counts. Malformed lines are skipped, matching the log's own
+// best-effort append semantics.
+func computeStats(path string) (statsSummary, error) {
+	sum := statsSummary{Hits: map[string]int{}, DynamicOutcomes: map[string]int{}}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return sum, err
+	}
+	defer f.Close()
+
+	var latencies []float64
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 65536), 65536)
+	for scanner.Scan() {
+		var entry AuditEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		sum.Events++
+		switch entry.Decision {
+		case "deny":
+			sum.Denies++
+			if entry.Rule != "" {
+				sum.Hits[entry.Rule]++
+			}
+		case "escalate":
+			sum.Escalates++
+		default:
+			sum.Allows++
+		}
+
+		if entry.Layer == "dynamic" && entry.Dynamic != nil {
+			sum.DynamicEvents++
+			sum.DynamicOutcomes[entry.Dynamic.Outcome]++
+			if entry.Dynamic.Error != "" {
+				sum.DynamicUnavailable++
+			}
+			if entry.Dynamic.LatencyMs > 0 {
+				latencies = append(latencies, entry.Dynamic.LatencyMs)
+			}
+		}
+	}
+
+	if p50, p95, ok := latencyPercentiles(latencies); ok {
+		sum.LatencyP50, sum.LatencyP95, sum.HasLatency = p50, p95, true
+	}
+	return sum, nil
+}
+
+// latencyPercentiles returns the p50/p95 of xs using the standard
+// nearest-rank method (index = ceil(p*n)-1, clamped), so p95 of a
+// 20-sample set is its max, not its 19th-of-20 value. ok is false for
+// an empty input.
+func latencyPercentiles(xs []float64) (p50, p95 float64, ok bool) {
+	if len(xs) == 0 {
+		return 0, 0, false
+	}
+	sorted := append([]float64(nil), xs...)
+	sort.Float64s(sorted)
+	n := len(sorted)
+	at := func(p float64) float64 {
+		idx := int(math.Ceil(p*float64(n))) - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= n {
+			idx = n - 1
+		}
+		return sorted[idx]
+	}
+	return at(0.50), at(0.95), true
+}
+
 // cmdStats reads the JSON-lines log file and prints aggregated counts:
-// total events, allows, denies, and per-rule hit counts.
+// total events, allows, escalates, denies, per-rule hit counts, and -
+// when the dynamic layer produced any entries - its unavailable rate
+// and latency percentiles (report.md §5f).
 func cmdStats(configPath string) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -273,46 +392,44 @@ func cmdStats(configPath string) {
 		return
 	}
 
-	f, err := os.Open(cfg.Log.Path)
+	sum, err := computeStats(cfg.Log.Path)
 	if err != nil {
 		fmt.Println("no log file")
 		return
 	}
-	defer f.Close()
 
-	var events, allows, denies int
-	hits := map[string]int{}
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 65536), 65536)
-	for scanner.Scan() {
-		var entry AuditEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			continue
-		}
-		events++
-		if entry.Decision == "deny" {
-			denies++
-			if entry.Rule != "" {
-				hits[entry.Rule]++
-			}
-		} else {
-			allows++
-		}
-	}
-
-	fmt.Printf("events:  %d\n", events)
-	fmt.Printf("allows:  %d\n", allows)
-	fmt.Printf("denies:  %d\n", denies)
-	if len(hits) > 0 {
+	fmt.Printf("events:    %d\n", sum.Events)
+	fmt.Printf("allows:    %d\n", sum.Allows)
+	fmt.Printf("escalates: %d\n", sum.Escalates)
+	fmt.Printf("denies:    %d\n", sum.Denies)
+	if len(sum.Hits) > 0 {
 		fmt.Println("hits:")
-		rules := make([]string, 0, len(hits))
-		for rule := range hits {
+		rules := make([]string, 0, len(sum.Hits))
+		for rule := range sum.Hits {
 			rules = append(rules, rule)
 		}
 		sort.Strings(rules)
 		for _, rule := range rules {
-			fmt.Printf("  %-24s %d\n", rule, hits[rule])
+			fmt.Printf("  %-24s %d\n", rule, sum.Hits[rule])
+		}
+	}
+
+	if sum.DynamicEvents > 0 {
+		fmt.Printf("\ndynamic:\n")
+		fmt.Printf("  events:      %d\n", sum.DynamicEvents)
+		fmt.Printf("  unavailable: %d (%.1f%%)\n", sum.DynamicUnavailable,
+			100*float64(sum.DynamicUnavailable)/float64(sum.DynamicEvents))
+		outcomes := make([]string, 0, len(sum.DynamicOutcomes))
+		for o := range sum.DynamicOutcomes {
+			outcomes = append(outcomes, o)
+		}
+		sort.Strings(outcomes)
+		for _, o := range outcomes {
+			fmt.Printf("  outcome %-10s %d\n", o, sum.DynamicOutcomes[o])
+		}
+		if sum.HasLatency {
+			fmt.Printf("  latency p50: %.0fms\n", sum.LatencyP50)
+			fmt.Printf("  latency p95: %.0fms\n", sum.LatencyP95)
 		}
 	}
 }

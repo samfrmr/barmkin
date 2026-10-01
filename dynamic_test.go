@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,12 +21,33 @@ import (
 // produce byte-identical eval output and log lines to the pre-dynamic
 // binary.
 
+// TestGoldenEquivalence_NoDynamicBlock replays every rule example from
+// the real rules.yaml plus the full false-positive corpus - not just a
+// synthetic 3-command sample - against the config as-shipped (no
+// dynamic block) and against an explicit enabled:false. This is the
+// "golden equivalence configs without the dynamic block" Phase 1 seam
+// (report.md §5g.1): the config an operator actually deploys must
+// produce byte-identical eval output whether the binary has ever heard
+// of the dynamic layer or not.
 func TestGoldenEquivalence_NoDynamicBlock(t *testing.T) {
-	rules := mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})
-	cfgNoBlock := &Config{Rules: rules}
-	cfgDisabled := &Config{Rules: rules, Dynamic: Dynamic{Enabled: false}}
+	cfgNoBlock, err := loadConfig(rulesYAMLPath(t))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	cfgDisabled, err := loadConfig(rulesYAMLPath(t))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	cfgDisabled.Dynamic = Dynamic{Enabled: false}
 
-	cases := []string{"rm -rf /tmp", "ls -la", "echo hi"}
+	var cases []string
+	for _, r := range cfgNoBlock.Rules {
+		if r.Example != "" {
+			cases = append(cases, r.Example)
+		}
+	}
+	cases = append(cases, falsePositiveCorpus...)
+
 	for _, cmd := range cases {
 		input, _ := json.Marshal(Request{Tool: "bash", Action: "ShellCommand", Args: map[string]any{"command": cmd}})
 
@@ -401,6 +423,35 @@ func TestBreaker_DeletedStateOnlyTriggersFreshProbe(t *testing.T) {
 	}
 }
 
+func TestSaveBreakerStateAtomic_ConcurrentWritesNeverCorrupt(t *testing.T) {
+	withTempHome(t)
+	sessionID := "concurrent-sess"
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			saveBreakerStateAtomic(sessionID, breakerState{Failures: n})
+		}(i)
+	}
+	wg.Wait()
+
+	// loadBreakerState must always see either a prior writer's complete,
+	// valid state or (on a corrupt/partial read) its own safe zero
+	// value - never panic, and never a file left over from a half
+	// torn write (the tmp-file leak this hardening closes).
+	st := loadBreakerState(sessionID)
+	if st.Failures < 0 {
+		t.Errorf("got negative failures %d", st.Failures)
+	}
+
+	leftovers, _ := filepath.Glob(breakerPath(sessionID) + ".tmp-*")
+	if len(leftovers) != 0 {
+		t.Errorf("leaked tmp files after concurrent writes: %v", leftovers)
+	}
+}
+
 // ── Jev client: transport failure matrix ───────────────────────────────
 
 func TestJevClient_NoKey(t *testing.T) {
@@ -740,6 +791,57 @@ func TestRedact_PlainCommandUnchanged(t *testing.T) {
 	plain := "git commit -m 'fix bug'"
 	if got := redact(plain); got != plain {
 		t.Errorf("redact(%q) = %q, want unchanged", plain, got)
+	}
+}
+
+// ── BARMKIN_DYNAMIC off-only kill switch (D7) ──────────────────────────────
+
+func TestLoadConfig_KillSwitchOffDisablesDynamic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(path, []byte("dynamic:\n  enabled: true\n  mode: enforce\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BARMKIN_DYNAMIC", "off")
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dynamic.Enabled {
+		t.Error("BARMKIN_DYNAMIC=off must disable the dynamic layer even when the config enables it")
+	}
+}
+
+func TestLoadConfig_KillSwitchIsOffOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(path, []byte("rules: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BARMKIN_DYNAMIC", "on")
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dynamic.Enabled {
+		t.Error("BARMKIN_DYNAMIC=on must never enable the dynamic layer (D7: off-only switch; only /etc/barmkin/rules.yaml may enable it)")
+	}
+}
+
+func TestLoadConfig_NoKillSwitchSetLeavesConfigUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(path, []byte("dynamic:\n  enabled: true\n  mode: shadow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BARMKIN_DYNAMIC", "")
+	os.Unsetenv("BARMKIN_DYNAMIC")
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Dynamic.Enabled {
+		t.Error("with no BARMKIN_DYNAMIC set, the config's own enabled:true must stand")
 	}
 }
 

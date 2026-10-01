@@ -38,37 +38,49 @@ func TestRulesFromConfig(t *testing.T) {
 	}
 }
 
+// falsePositiveCorpus is shared with TestGoldenEquivalence_NoDynamicBlock
+// (dynamic_test.go), which replays it through the full engine to prove
+// the dynamic layer's presence (absent/disabled) never changes regex
+// behavior for any of these.
+var falsePositiveCorpus = []string{
+	// common dev commands
+	"ls -la", "cat README.md", "git status", "npm install",
+	"git push origin main", "rm file.txt", "git log --oneline",
+	"echo hello", "cargo build --release", "grep TODO src/",
+	"go test ./...", "python script.py", "make build",
+	"docker ps", "docker logs web", "kubectl get pods",
+	"ssh user@host", "scp file.txt user@host:~/",
+	"curl https://api.github.com/repos", "wget https://releases.com/pkg.tar.gz",
+	"pip install requests", "npm install express",
+	"chmod +x deploy.sh", "chown dave README.md",
+	"export PATH=/usr/local/bin:$PATH", "source venv/bin/activate",
+	// safe database
+	"SELECT * FROM users", "INSERT INTO users VALUES (1)",
+	"UPDATE users SET name='x' WHERE id=1",
+	// safe with keywords that look dangerous
+	"echo 'do not DROP anything'",
+	"cat docs/shutdown-procedure.md",
+	"grep -r 'fork' src/",
+	"git log --grep='force'",
+	"docker rm old-container",
+	"kubectl get namespace",
+	"history | tail -5",
+	"cat ~/.bashrc",
+	// sensitive-looking but benign file_path targets (not the exact
+	// file the new path rules above target)
+	"/home/user/.ssh/config",
+	"/home/user/.ssh/known_hosts",
+	"/home/user/project/.env.example",
+	"/home/user/project/.envrc",
+	"/home/user/.aws/config",
+}
+
 func TestFalsePositives(t *testing.T) {
 	cfg, err := loadConfig(rulesYAMLPath(t))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	safe := []string{
-		// common dev commands
-		"ls -la", "cat README.md", "git status", "npm install",
-		"git push origin main", "rm file.txt", "git log --oneline",
-		"echo hello", "cargo build --release", "grep TODO src/",
-		"go test ./...", "python script.py", "make build",
-		"docker ps", "docker logs web", "kubectl get pods",
-		"ssh user@host", "scp file.txt user@host:~/",
-		"curl https://api.github.com/repos", "wget https://releases.com/pkg.tar.gz",
-		"pip install requests", "npm install express",
-		"chmod +x deploy.sh", "chown dave README.md",
-		"export PATH=/usr/local/bin:$PATH", "source venv/bin/activate",
-		// safe database
-		"SELECT * FROM users", "INSERT INTO users VALUES (1)",
-		"UPDATE users SET name='x' WHERE id=1",
-		// safe with keywords that look dangerous
-		"echo 'do not DROP anything'",
-		"cat docs/shutdown-procedure.md",
-		"grep -r 'fork' src/",
-		"git log --grep='force'",
-		"docker rm old-container",
-		"kubectl get namespace",
-		"history | tail -5",
-		"cat ~/.bashrc",
-	}
-	for _, cmd := range safe {
+	for _, cmd := range falsePositiveCorpus {
 		if m := match(cmd, cfg.Rules); m != nil {
 			t.Errorf("safe %q matched %q", cmd, m.Name)
 		}
@@ -121,6 +133,16 @@ func TestExtractContent(t *testing.T) {
 			"claude-code top-level command",
 			Request{Command: "rm -rf /"},
 			"rm -rf /",
+		},
+		{
+			"claude-code Write/Edit file_path",
+			Request{ToolInput: []byte(`{"file_path":"/home/u/.ssh/authorized_keys"}`), ToolName: "Edit"},
+			"/home/u/.ssh/authorized_keys",
+		},
+		{
+			"copilot-cli toolArgs command",
+			Request{ToolNameCamel: "Bash", ToolArgsCamel: []byte(`{"command":"ls -la"}`)},
+			"ls -la",
 		},
 	}
 	for _, tc := range cases {
@@ -177,6 +199,49 @@ func TestEngine_EvaluateAllow(t *testing.T) {
 	})
 	if e.evaluate(input).Decision != "allow" {
 		t.Error("expected allow")
+	}
+}
+
+func TestEngine_EvaluateCopilotCLI_SetsAgentID(t *testing.T) {
+	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
+	input, _ := json.Marshal(map[string]any{
+		"toolName": "Bash",
+		"toolArgs": map[string]any{"command": "ls -la"},
+	})
+	r := e.evaluate(input)
+	if r.Decision != "allow" {
+		t.Fatalf("got %+v", r)
+	}
+	if r.AgentID != "copilot-cli" {
+		t.Errorf("AgentID = %q, want copilot-cli", r.AgentID)
+	}
+}
+
+func TestEngine_EvaluateCopilotCLI_Deny(t *testing.T) {
+	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
+	input, _ := json.Marshal(map[string]any{
+		"toolName": "Bash",
+		"toolArgs": map[string]any{"command": "rm -rf /tmp"},
+	})
+	r := e.evaluate(input)
+	if r.Decision != "deny" || r.AgentID != "copilot-cli" {
+		t.Errorf("got %+v", r)
+	}
+}
+
+func TestEngine_EvaluateClaudeCode_AgentIDUnaffectedByCopilotFields(t *testing.T) {
+	// A Claude Code request never carries toolName/toolArgs, but guard
+	// against a future field-name collision silently misclassifying
+	// the harness.
+	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
+	input, _ := json.Marshal(map[string]any{
+		"tool_name":  "Bash",
+		"tool_input": map[string]any{"command": "ls -la"},
+		"session_id": "sess-1",
+	})
+	r := e.evaluate(input)
+	if r.AgentID != "claude-code" {
+		t.Errorf("AgentID = %q, want claude-code", r.AgentID)
 	}
 }
 

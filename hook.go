@@ -36,6 +36,16 @@ type Request struct {
 	Command        string          `json:"command"`
 	SessionID      string          `json:"session_id"`
 	PermissionMode string          `json:"permission_mode,omitempty"` // e.g. "auto", "bypassPermissions", "dontAsk"
+
+	// GitHub Copilot CLI preToolUse fields (camelCase; report.md §5c,
+	// §4.5: "the preToolUse dialect documented... for the CLI (camelCase
+	// toolName/toolArgs, bare permissionDecision)"). Distinct from Claude
+	// Code's snake_case tool_name/tool_input, so presence of either
+	// toolName or toolArgs with no Claude Code field identifies this
+	// harness in normalize().
+	ToolNameCamel  string          `json:"toolName,omitempty"`
+	ToolArgsCamel  json.RawMessage `json:"toolArgs,omitempty"`
+	SessionIDCamel string          `json:"sessionId,omitempty"`
 }
 
 // HookOutput is the evaluation result returned by the engine.
@@ -43,6 +53,14 @@ type HookOutput struct {
 	Decision string `json:"decision"`         // "allow" or "deny"
 	Reason   string `json:"reason,omitempty"` // human-readable, shown to LLM on deny
 	Rule     string `json:"rule,omitempty"`   // rule name that matched
+
+	// AgentID is never serialized (json:"-"): it only tells cmdEval
+	// which harness-specific output dialect to render (Claude Code's
+	// silent-exit-0/ask-JSON vs. Copilot CLI's always-explicit
+	// permissionDecision JSON, report.md §5c). Excluding it from the
+	// wire format keeps HookOutput's JSON byte-identical to before this
+	// field existed, which the golden-equivalence tests rely on.
+	AgentID string `json:"-"`
 }
 
 // toolActions maps Claude Code tool names to semantic action names
@@ -53,11 +71,15 @@ var toolActions = map[string]string{
 	"read": "FileRead", "glob": "FileSearch", "grep": "ContentSearch",
 }
 
-// normalize maps Claude Code fields into AdapterRequest fields so the
-// audit log has consistent tool/action/trajectory_id regardless of source.
+// normalize maps Claude Code and Copilot CLI fields into AdapterRequest
+// fields so the audit log has consistent tool/action/trajectory_id
+// regardless of source.
 func (r *Request) normalize() {
 	if r.Tool == "" && r.ToolName != "" {
 		r.Tool = strings.ToLower(r.ToolName)
+	}
+	if r.Tool == "" && r.ToolNameCamel != "" {
+		r.Tool = strings.ToLower(r.ToolNameCamel)
 	}
 	if r.Action == "" && r.Tool != "" {
 		r.Action = toolActions[r.Tool]
@@ -65,13 +87,21 @@ func (r *Request) normalize() {
 	if r.TrajectoryID == "" && r.SessionID != "" {
 		r.TrajectoryID = r.SessionID
 	}
+	if r.TrajectoryID == "" && r.SessionIDCamel != "" {
+		r.TrajectoryID = r.SessionIDCamel
+	}
 	if r.AgentID == "" {
-		// Infer agent from wire format: Claude Code uses tool_name/session_id;
-		// opencode uses trajectory_id/args. Default to opencode when neither
-		// Claude Code field is present.
-		if r.ToolName != "" || r.SessionID != "" {
+		// Infer agent from wire format: Claude Code uses snake_case
+		// tool_name/session_id; Copilot CLI's preToolUse hook uses
+		// camelCase toolName/toolArgs (report.md §5c); opencode uses
+		// trajectory_id/args. Default to opencode when none of the
+		// harness-specific fields are present.
+		switch {
+		case r.ToolName != "" || r.SessionID != "":
 			r.AgentID = "claude-code"
-		} else {
+		case r.ToolNameCamel != "" || len(r.ToolArgsCamel) > 0:
+			r.AgentID = "copilot-cli"
+		default:
 			r.AgentID = "opencode"
 		}
 	}
@@ -89,8 +119,14 @@ func (r *Request) extractContent() string {
 	if r.Command != "" {
 		return r.Command
 	}
-	// Claude Code: tool_input JSON object
-	if s := firstString(r.ToolInput, "command", "path", "filePath", "url", "content"); s != "" {
+	// Claude Code: tool_input JSON object. file_path is Write/Edit's
+	// actual field name (report.md §2.7); without it, a file-tool
+	// target path was never scanned by any rule.
+	if s := firstString(r.ToolInput, "command", "path", "filePath", "file_path", "url", "content"); s != "" {
+		return s
+	}
+	// Copilot CLI: toolArgs JSON object (camelCase dialect, §5c).
+	if s := firstString(r.ToolArgsCamel, "command", "path", "filePath", "file_path", "url", "content"); s != "" {
 		return s
 	}
 	// Fallback: serialize remaining args

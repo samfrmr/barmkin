@@ -319,7 +319,12 @@ func loadBreakerState(sessionID string) breakerState {
 
 // saveBreakerStateAtomic writes via write-temp-then-rename so a
 // concurrent reader (parallel tool calls each spawn their own
-// process) never observes a partial write.
+// process) never observes a partial write. The temp name carries both
+// pid and nanotime: two processes racing in the same nanosecond (seen
+// under load with parallel tool calls) would otherwise collide on the
+// same tmp path and could stomp each other's write before the rename.
+// A failed rename cleans up its own tmp file rather than leaking it
+// into ~/.barmkin/state.
 func saveBreakerStateAtomic(sessionID string, st breakerState) {
 	path := breakerPath(sessionID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -329,11 +334,13 @@ func saveBreakerStateAtomic(sessionID string, st breakerState) {
 	if err != nil {
 		return
 	}
-	tmp := fmt.Sprintf("%s.tmp-%d", path, time.Now().UnixNano())
+	tmp := fmt.Sprintf("%s.tmp-%d-%d", path, os.Getpid(), time.Now().UnixNano())
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return
 	}
-	os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+	}
 }
 
 // breakerIsOpen reports whether the breaker currently short-circuits
