@@ -23,7 +23,7 @@ go build -o barmkin .
 sudo ./install.sh
 ```
 
-This puts the binary in `~/.local/bin/`, the config in `/etc/barmkin/rules.yaml`, and registers hooks for Claude Code, opencode, and GitHub Copilot CLI. Pass `claude`, `opencode`, or `copilot-cli` to install for one harness only.
+This puts the binary in `~/.local/bin/`, the config in `/etc/barmkin/rules.yaml`, and registers hooks for both Claude Code and opencode.
 
 ### Claude Code
 
@@ -33,9 +33,8 @@ A PreToolUse hook in `~/.claude/settings.json` runs `barmkin eval` on every `Bas
 
 The plugin at `plugins/barmkin.ts` spawns `barmkin eval` on every `tool.execute.before` event. Installed to `~/.config/opencode/plugins/`.
 
-### GitHub Copilot CLI
-
-A preToolUse hook in `/etc/github-copilot/policy.d/barmkin.json` runs `/usr/local/bin/barmkin eval`. Barmkin always answers with explicit `permissionDecision` JSON. The registration schema has not yet been verified against a real Copilot CLI install; see [demo/README.md](demo/README.md).
+> GitHub Copilot CLI and GitHub Copilot in VS Code are out of scope for
+> this POC and tracked separately.
 
 ## Commands
 

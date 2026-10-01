@@ -36,16 +36,6 @@ type Request struct {
 	Command        string          `json:"command"`
 	SessionID      string          `json:"session_id"`
 	PermissionMode string          `json:"permission_mode,omitempty"` // e.g. "auto", "bypassPermissions", "dontAsk"
-
-	// GitHub Copilot CLI preToolUse fields (camelCase; report.md §5c,
-	// §4.5: "the preToolUse dialect documented... for the CLI (camelCase
-	// toolName/toolArgs, bare permissionDecision)"). Distinct from Claude
-	// Code's snake_case tool_name/tool_input, so presence of either
-	// toolName or toolArgs with no Claude Code field identifies this
-	// harness in normalize().
-	ToolNameCamel  string          `json:"toolName,omitempty"`
-	ToolArgsCamel  json.RawMessage `json:"toolArgs,omitempty"`
-	SessionIDCamel string          `json:"sessionId,omitempty"`
 }
 
 // HookOutput is the evaluation result returned by the engine.
@@ -53,14 +43,6 @@ type HookOutput struct {
 	Decision string `json:"decision"`         // "allow" or "deny"
 	Reason   string `json:"reason,omitempty"` // human-readable, shown to LLM on deny
 	Rule     string `json:"rule,omitempty"`   // rule name that matched
-
-	// AgentID is never serialized (json:"-"): it only tells cmdEval
-	// which harness-specific output dialect to render (Claude Code's
-	// silent-exit-0/ask-JSON vs. Copilot CLI's always-explicit
-	// permissionDecision JSON, report.md §5c). Excluding it from the
-	// wire format keeps HookOutput's JSON byte-identical to before this
-	// field existed, which the golden-equivalence tests rely on.
-	AgentID string `json:"-"`
 }
 
 // toolActions maps Claude Code tool names to semantic action names
@@ -72,15 +54,11 @@ var toolActions = map[string]string{
 	"websearch": "WebSearch",
 }
 
-// normalize maps Claude Code and Copilot CLI fields into AdapterRequest
-// fields so the audit log has consistent tool/action/trajectory_id
-// regardless of source.
+// normalize maps Claude Code fields into AdapterRequest fields so the
+// audit log has consistent tool/action/trajectory_id regardless of source.
 func (r *Request) normalize() {
 	if r.Tool == "" && r.ToolName != "" {
 		r.Tool = strings.ToLower(r.ToolName)
-	}
-	if r.Tool == "" && r.ToolNameCamel != "" {
-		r.Tool = strings.ToLower(r.ToolNameCamel)
 	}
 	if r.Action == "" && r.Tool != "" {
 		r.Action = toolActions[r.Tool]
@@ -88,21 +66,13 @@ func (r *Request) normalize() {
 	if r.TrajectoryID == "" && r.SessionID != "" {
 		r.TrajectoryID = r.SessionID
 	}
-	if r.TrajectoryID == "" && r.SessionIDCamel != "" {
-		r.TrajectoryID = r.SessionIDCamel
-	}
 	if r.AgentID == "" {
-		// Infer agent from wire format: Claude Code uses snake_case
-		// tool_name/session_id; Copilot CLI's preToolUse hook uses
-		// camelCase toolName/toolArgs (report.md §5c); opencode uses
-		// trajectory_id/args. Default to opencode when none of the
-		// harness-specific fields are present.
-		switch {
-		case r.ToolName != "" || r.SessionID != "":
+		// Infer agent from wire format: Claude Code uses tool_name/session_id;
+		// opencode uses trajectory_id/args. Default to opencode when neither
+		// Claude Code field is present.
+		if r.ToolName != "" || r.SessionID != "" {
 			r.AgentID = "claude-code"
-		case r.ToolNameCamel != "" || len(r.ToolArgsCamel) > 0:
-			r.AgentID = "copilot-cli"
-		default:
+		} else {
 			r.AgentID = "opencode"
 		}
 	}
@@ -128,10 +98,6 @@ func (r *Request) extractContent() string {
 	if s := firstString(r.ToolInput, "command", "path", "filePath", "file_path", "url", "content"); s != "" {
 		return s
 	}
-	// Copilot CLI: toolArgs JSON object (camelCase dialect, §5c).
-	if s := firstString(r.ToolArgsCamel, "command", "path", "filePath", "file_path", "url", "content"); s != "" {
-		return s
-	}
 	if r.readOnly() {
 		return ""
 	}
@@ -153,18 +119,18 @@ func (r *Request) readOnly() bool {
 	return r.Action == "FileRead" || strings.HasSuffix(r.Action, "Search")
 }
 
-// fileMutatingTools are the (lowercased) Claude Code and Copilot CLI
-// tools whose individual fields are scanned. Read-only tools (Grep,
-// Glob, Read, ...) are scanned on extractContent alone, so a search
-// pattern is never treated as a payload.
+// fileMutatingTools are the (lowercased) Claude Code tools whose
+// individual fields are scanned. Read-only tools (Grep, Glob, Read,
+// ...) are scanned on extractContent alone, so a search pattern is
+// never treated as a payload.
 var fileMutatingTools = map[string]bool{
 	"write": true, "edit": true, "multiedit": true, "notebookedit": true,
 	"create": true,
 }
 
-// filePathFields and filePayloadFields are the tool_input/toolArgs
-// keys whose values are each scanned on their own, so a file-mutating
-// tool is checked on both its target path and its payload.
+// filePathFields and filePayloadFields are the tool_input keys whose
+// values are each scanned on their own, so a file-mutating tool is
+// checked on both its target path and its payload.
 var (
 	filePathFields    = []string{"path", "filePath", "file_path", "notebook_path"}
 	filePayloadFields = []string{
@@ -177,27 +143,25 @@ var (
 // against. paths holds the primary extractContent value plus, for
 // file-mutating tools, each filePathFields value; every rule applies
 // to these. payloads holds each filePayloadFields value from Claude
-// Code's tool_input, Copilot CLI's toolArgs, and MultiEdit's edits;
-// path-only rules (target: path) never apply to these.
+// Code's tool_input and MultiEdit's edits; path-only rules (target:
+// path) never apply to these.
 func (r *Request) scanTargets() (paths, payloads []string) {
 	paths = []string{r.extractContent()}
 	if !fileMutatingTools[r.Tool] {
 		return paths, nil
 	}
-	for _, raw := range []json.RawMessage{r.ToolInput, r.ToolArgsCamel} {
-		m := decodeObject(raw)
-		objs := []map[string]any{m}
-		if edits, ok := m["edits"].([]any); ok {
-			for _, e := range edits {
-				if em, ok := e.(map[string]any); ok {
-					objs = append(objs, em)
-				}
+	m := decodeObject(r.ToolInput)
+	objs := []map[string]any{m}
+	if edits, ok := m["edits"].([]any); ok {
+		for _, e := range edits {
+			if em, ok := e.(map[string]any); ok {
+				objs = append(objs, em)
 			}
 		}
-		for _, o := range objs {
-			paths = appendStrings(paths, o, filePathFields)
-			payloads = appendStrings(payloads, o, filePayloadFields)
-		}
+	}
+	for _, o := range objs {
+		paths = appendStrings(paths, o, filePathFields)
+		payloads = appendStrings(payloads, o, filePayloadFields)
 	}
 	return paths, payloads
 }
@@ -236,22 +200,16 @@ func firstNonEmpty(m map[string]any, keys ...string) string {
 }
 
 // firstString unmarshals a JSON RawMessage into a map and returns the
-// first non-empty string value for any of the given keys. A JSON
-// string holding an encoded object (Copilot CLI's toolArgs) is
-// decoded first.
+// first non-empty string value for any of the given keys.
 func firstString(raw json.RawMessage, keys ...string) string {
 	return firstNonEmpty(decodeObject(raw), keys...)
 }
 
-// decodeObject unmarshals a JSON object, or a JSON string holding an
-// encoded object, into a map. Anything else yields nil.
+// decodeObject unmarshals a JSON object into a map. Anything else
+// yields nil.
 func decodeObject(raw json.RawMessage) map[string]any {
 	if len(raw) == 0 {
 		return nil
-	}
-	var encoded string
-	if json.Unmarshal(raw, &encoded) == nil {
-		raw = json.RawMessage(encoded)
 	}
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {

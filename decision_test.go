@@ -10,21 +10,6 @@ func TestRenderEscalateJSON(t *testing.T) {
 	}
 }
 
-func TestRenderCopilotCLIOutput(t *testing.T) {
-	cases := []struct {
-		decision, reason, want string
-	}{
-		{"allow", "", `{"permissionDecision":"allow"}`},
-		{"ask", "semantic check: no_outward_effect (p=0.07)", `{"permissionDecision":"ask","permissionDecisionReason":"semantic check: no_outward_effect (p=0.07)"}`},
-		{"deny", "blocked by rule: rm-rf-force", `{"permissionDecision":"deny","permissionDecisionReason":"blocked by rule: rm-rf-force"}`},
-	}
-	for _, tc := range cases {
-		if got := renderCopilotCLIOutput(tc.decision, tc.reason); got != tc.want {
-			t.Errorf("renderCopilotCLIOutput(%q, %q) = %s, want %s", tc.decision, tc.reason, got, tc.want)
-		}
-	}
-}
-
 func TestDecision_String(t *testing.T) {
 	cases := []struct {
 		d    Decision

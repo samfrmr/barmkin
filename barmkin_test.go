@@ -139,16 +139,6 @@ func TestExtractContent(t *testing.T) {
 			Request{ToolInput: []byte(`{"file_path":"/home/u/.ssh/authorized_keys"}`), ToolName: "Edit"},
 			"/home/u/.ssh/authorized_keys",
 		},
-		{
-			"copilot-cli toolArgs command",
-			Request{ToolNameCamel: "Bash", ToolArgsCamel: []byte(`{"command":"ls -la"}`)},
-			"ls -la",
-		},
-		{
-			"copilot-cli string-encoded toolArgs command",
-			Request{ToolNameCamel: "bash", ToolArgsCamel: []byte(`"{\"command\":\"rm -rf /\"}"`)},
-			"rm -rf /",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -207,33 +197,6 @@ func TestEngine_EvaluateAllow(t *testing.T) {
 	}
 }
 
-func TestEngine_EvaluateCopilotCLI_SetsAgentID(t *testing.T) {
-	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
-	input, _ := json.Marshal(map[string]any{
-		"toolName": "Bash",
-		"toolArgs": map[string]any{"command": "ls -la"},
-	})
-	r := e.evaluate(input)
-	if r.Decision != "allow" {
-		t.Fatalf("got %+v", r)
-	}
-	if r.AgentID != "copilot-cli" {
-		t.Errorf("AgentID = %q, want copilot-cli", r.AgentID)
-	}
-}
-
-func TestEngine_EvaluateCopilotCLI_Deny(t *testing.T) {
-	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
-	input, _ := json.Marshal(map[string]any{
-		"toolName": "Bash",
-		"toolArgs": map[string]any{"command": "rm -rf /tmp"},
-	})
-	r := e.evaluate(input)
-	if r.Decision != "deny" || r.AgentID != "copilot-cli" {
-		t.Errorf("got %+v", r)
-	}
-}
-
 func TestEngine_EvaluateFileTools_ScanPathAndPayload(t *testing.T) {
 	e := newEngine(&Config{Rules: mustRules(t,
 		[2]string{"private-key-block", `-----BEGIN\s+(RSA|EC|OPENSSH|PRIVATE)\s+(PRIVATE\s+)?KEY-----`},
@@ -248,7 +211,6 @@ func TestEngine_EvaluateFileTools_ScanPathAndPayload(t *testing.T) {
 		{"claude Write content", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/k.pem", "content": "-----BEGIN RSA PRIVATE KEY-----\nMIIE"}}, "private-key-block"},
 		{"claude Edit new_string", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/tmp/x", "old_string": "a", "new_string": "token=ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII"}}, "github-token"},
 		{"claude Write sensitive path", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/home/u/.ssh/id_rsa", "content": "harmless"}}, "ssh-private-key-path"},
-		{"copilot edit new_str", map[string]any{"toolName": "edit", "toolArgs": `{"path":"/tmp/x","old_str":"a","new_str":"-----BEGIN OPENSSH PRIVATE KEY-----"}`}, "private-key-block"},
 		{"claude MultiEdit new_string", map[string]any{"tool_name": "MultiEdit", "tool_input": map[string]any{"file_path": "/tmp/x", "edits": []any{map[string]any{"old_string": "a", "new_string": "-----BEGIN EC PRIVATE KEY-----"}}}}, "private-key-block"},
 		{"claude Write benign", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/notes.md", "content": "hello"}}, ""},
 	}
@@ -338,7 +300,6 @@ func TestEngine_EvaluatePathRules_OnlyMatchPaths(t *testing.T) {
 		{"Edit new_string app.env", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/repo/docker-compose.yml", "old_string": "app.yaml", "new_string": "app.env"}}, ""},
 		{"Edit README .env", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/repo/README.md", "old_string": ".env.example", "new_string": ".env"}}, ""},
 		{"Write content npmrc", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/x.txt", "content": "~/.npmrc"}}, ""},
-		{"copilot edit new_str .env", map[string]any{"toolName": "edit", "toolArgs": `{"path":"/repo/a.yml","old_str":"a","new_str":"prod.env"}`}, ""},
 		{"Write ssh key path", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/home/user/.ssh/id_rsa", "content": "x"}}, "ssh-private-key-path"},
 		{"Edit .env path", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/repo/.env", "old_string": "a", "new_string": "b"}}, "dotenv-path"},
 		{"NotebookEdit path", map[string]any{"tool_name": "NotebookEdit", "tool_input": map[string]any{"notebook_path": "/home/user/.aws/credentials", "new_source": "x"}}, "credentials-file-path"},
@@ -351,34 +312,6 @@ func TestEngine_EvaluatePathRules_OnlyMatchPaths(t *testing.T) {
 				t.Errorf("got %+v, want rule %q", r, tc.want)
 			}
 		})
-	}
-}
-
-func TestEngine_EvaluateCopilotCLI_StringEncodedToolArgsDeny(t *testing.T) {
-	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
-	input, _ := json.Marshal(map[string]any{
-		"toolName": "bash",
-		"toolArgs": `{"command":"rm -rf /"}`,
-	})
-	r := e.evaluate(input)
-	if r.Decision != "deny" || r.AgentID != "copilot-cli" {
-		t.Errorf("got %+v", r)
-	}
-}
-
-func TestEngine_EvaluateClaudeCode_AgentIDUnaffectedByCopilotFields(t *testing.T) {
-	// A Claude Code request never carries toolName/toolArgs, but guard
-	// against a future field-name collision silently misclassifying
-	// the harness.
-	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
-	input, _ := json.Marshal(map[string]any{
-		"tool_name":  "Bash",
-		"tool_input": map[string]any{"command": "ls -la"},
-		"session_id": "sess-1",
-	})
-	r := e.evaluate(input)
-	if r.AgentID != "claude-code" {
-		t.Errorf("AgentID = %q, want claude-code", r.AgentID)
 	}
 }
 

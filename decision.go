@@ -59,23 +59,3 @@ func renderEscalateJSON(reason string) string {
 	b, _ := json.Marshal(out)
 	return string(b)
 }
-
-// copilotCLIOutput is GitHub Copilot CLI's preToolUse hook JSON output:
-// {"permissionDecision":"allow"|"deny"|"ask","permissionDecisionReason":"…"}
-// (report.md §5c/§4.5). Unlike Claude Code, no documented case treats a
-// silent exit 0 as "no decision" on this harness - every documented
-// example emits explicit JSON - so Barmkin renders this on every
-// outcome for Copilot CLI, including pass, rather than relying on
-// silence.
-type copilotCLIOutput struct {
-	PermissionDecision       string `json:"permissionDecision"`
-	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
-}
-
-// renderCopilotCLIOutput builds the Copilot CLI preToolUse payload.
-// decision is "allow", "ask", or "deny".
-func renderCopilotCLIOutput(decision, reason string) string {
-	out := copilotCLIOutput{PermissionDecision: decision, PermissionDecisionReason: reason}
-	b, _ := json.Marshal(out)
-	return string(b)
-}

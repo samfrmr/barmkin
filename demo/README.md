@@ -62,9 +62,7 @@ egress with no corporate gateway/proxy, revised 2026-10-01 above to
 default to an internal gateway):
 
 - **Phase 1 refactor** (`decision.go`): a `Decision{Pass,Escalate,Deny}`
-  type, a Claude Code output adapter (`renderEscalateJSON`), and a
-  GitHub Copilot CLI output adapter (`renderCopilotCLIOutput`,
-  `{"permissionDecision":"allow"|"deny"|"ask",...}` - report.md §5c).
+  type and a Claude Code output adapter (`renderEscalateJSON`).
   `barmkin stats` now counts `escalate` separately from `allow` and
   summarizes the dynamic layer's unavailable rate and p50/p95 latency
   (`main.go`'s `computeStats`); file-mutating tools (Write/Edit) are
@@ -127,61 +125,27 @@ default to an internal gateway):
   (D9) to a later milestone - not checked by this demo.
 
 Out of scope here (see report.md §5h "Phase 4" and the demo brief):
-opencode and GitHub Copilot in VS Code adapters, an `intent_coverage`
-question, a local daemon, and the Phase 0 harness contract checks
-(those need a human with a real account on a real harness, including
-confirming the Copilot CLI `preToolUse`/`policy.d` mechanics below
-against a real install). Tier A credential *shapes* (`auth.type:
-none`/`command`) are now in scope and implemented; a real internal
-gateway to point them at is not - that's the open item above. Copilot
-CLI's output adapter and `policy.d` hook-registration snippet, and
-Write/Edit path gating, were out of scope for the original demo brief
-but are now implemented (see the Phase 1 refactor bullet above and the
-"GitHub Copilot CLI" section below).
+opencode and GitHub Copilot (both the CLI and in VS Code) adapters, an
+`intent_coverage` question, a local daemon, and the Phase 0 harness
+contract checks (those need a human with a real account on a real
+harness). Tier A credential *shapes* (`auth.type: none`/`command`) are
+now in scope and implemented; a real internal gateway to point them at
+is not - that's the open item above. Write/Edit path gating was out of
+scope for the original demo brief but is now implemented (see the
+Phase 1 refactor bullet above).
 
-## GitHub Copilot CLI (enforce target #2, alongside Claude Code)
-
-Per the captain's D5 sequencing (report.md, bottom - "Claude Code and
-Copilot CLI together first"), Copilot CLI already has its own genuine
-`preToolUse` hook with a confirmed `ask`, structurally the same
-pass/escalate/deny shape as Claude Code's hook. `main.go`'s `cmdEval`
-detects a Copilot CLI request (camelCase `toolName`/`toolArgs`, no
-Claude Code `tool_name`/`session_id`) and renders
-`decision.go`'s `renderCopilotCLIOutput` instead of the Claude Code
-adapter:
-
-- pass → `{"permissionDecision":"allow"}` (always explicit; unlike
-  Claude Code there's no documented silent-exit-0 convention here)
-- escalate → `{"permissionDecision":"ask","permissionDecisionReason":"…"}`
-- deny → the same JSON with `"deny"`, plus the existing exit 2 (kept
-  for forward compatibility with whichever of "exit 2" or the JSON
-  field this harness actually reads for the reason - report.md §5c)
-
-Register the hook on the admin-exclusive channel:
-
-```
-sudo ./install.sh copilot-cli
-```
-
-This writes `/etc/github-copilot/policy.d/barmkin.json` and copies the
-binary to `/usr/local/bin/barmkin` (a fixed, fleet-wide path, since
-`policy.d` is machine-scoped, not per-user like Claude Code's
-`~/.claude/settings.json`). **The exact on-disk schema is this scout's
-best-effort reconstruction from GitHub's docs, not verified against a
-real Copilot CLI install** - confirming it actually fires (and the
-version floor, ≥ 1.0.66 for honoured `ask`) is a Phase 0 operator
-check, same status as this demo's unverified internal-gateway
-connectivity above. Barmkin's own side - the output adapter and input
-detection - is unit-tested against the documented wire shapes
-(`decision_test.go`, `barmkin_test.go`'s Copilot CLI engine tests), the
-same "unit-test the wire format, leave live connectivity to Phase 0"
-split used for the Jev client itself.
+**Copilot CLI scope note:** an earlier pass of this work added a
+Copilot CLI output adapter and a `/etc/github-copilot/policy.d`
+install snippet (report.md's Copilot addendum, D5 sequencing - "Claude
+Code and Copilot CLI together first"). The captain has since scoped
+Copilot CLI and Copilot-in-VS-Code out of this PR; that work was
+removed and is tracked separately, not shipped here.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `decision.go` | `Decision` enum + Claude Code and Copilot CLI output adapters |
+| `decision.go` | `Decision` enum + Claude Code escalate-JSON output adapter |
 | `jev.go` | System One client: auth, redaction, transport, strict validation |
 | `dynamic.go` | gate, state builder, composition, per-session breaker |
 | `config.go` (`dynamic:` block) | provider/gate/on_unavailable/breaker config, `validate` support |

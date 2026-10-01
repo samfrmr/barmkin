@@ -1,11 +1,11 @@
 // Barmkin - lightweight regex guardrail for AI coding agents.
 //
-// Barmkin evaluates tool calls from Claude Code, opencode, and GitHub
-// Copilot CLI before they execute. It matches the command content against
-// a set of regex rules and blocks (exit 2) or allows (exit 0) the call.
-// No daemon, no network by default - just regex, sub-millisecond per
-// evaluation. The optional dynamic layer (dynamic.go) can additionally
-// escalate or deny gated shell commands via a hosted classifier.
+// Barmkin evaluates tool calls from Claude Code and opencode before they
+// execute. It matches the command content against a set of regex rules
+// and blocks (exit 2) or allows (exit 0) the call. No daemon, no network
+// by default - just regex, sub-millisecond per evaluation. The optional
+// dynamic layer (dynamic.go) can additionally escalate or deny gated
+// shell commands via a hosted classifier.
 //
 // Usage:
 //
@@ -27,10 +27,6 @@
 //
 //	Opencode spawns barmkin eval as a subprocess from the TS plugin
 //	(barmkin.ts) on every tool.execute.before event.
-//
-//	Copilot CLI pipes {"toolName":"...","toolArgs":...} from its
-//	preToolUse hook; barmkin always replies with explicit
-//	{"permissionDecision":...} JSON on stdout (renderCopilotCLIOutput).
 package main
 
 import (
@@ -131,40 +127,18 @@ func cmdEval(configPath string) {
 	defer engine.close()
 	result := engine.evaluate(data)
 
-	isCopilotCLI := result.AgentID == "copilot-cli"
-
 	switch result.Decision {
 	case "deny":
 		msg := result.Reason
 		if msg == "" {
 			msg = fmt.Sprintf("blocked by rule: %s", result.Rule)
 		}
-		if isCopilotCLI {
-			// Always emit explicit JSON rather than relying on stderr,
-			// since it's undocumented whether this harness surfaces
-			// stderr (vs. stdout) as the deny reason (report.md §5c).
-			fmt.Println(renderCopilotCLIOutput("deny", msg))
-		} else {
-			fmt.Fprintf(os.Stderr, "[barmkin] %s\n", msg)
-		}
+		fmt.Fprintf(os.Stderr, "[barmkin] %s\n", msg)
 		os.Exit(2)
 	case "escalate":
-		if isCopilotCLI {
-			// Confirmed honoured from Copilot CLI >= 1.0.66 (report.md §5c).
-			fmt.Println(renderCopilotCLIOutput("ask", result.Reason))
-		} else {
-			// Forces a Claude Code permission prompt even in auto mode
-			// (>= v2.1.211). Exit 0: this is not a deny.
-			fmt.Println(renderEscalateJSON(result.Reason))
-		}
-	case "allow":
-		if isCopilotCLI {
-			// No documented silent-exit-0-means-pass convention on this
-			// harness; always emit explicit allow (report.md §5c
-			// recommendation).
-			fmt.Println(renderCopilotCLIOutput("allow", ""))
-		}
-		// Claude Code / opencode: silent exit 0, unchanged.
+		// Forces a Claude Code permission prompt even in auto mode
+		// (>= v2.1.211). Exit 0: this is not a deny.
+		fmt.Println(renderEscalateJSON(result.Reason))
 	}
 }
 
