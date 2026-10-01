@@ -24,9 +24,10 @@ import (
 
 // Config is the top-level YAML structure.
 type Config struct {
-	Rules []Rule `yaml:"rules"`
-	OTel  OTel   `yaml:"otel"`
-	Log   Log    `yaml:"log"`
+	Rules   []Rule  `yaml:"rules"`
+	OTel    OTel    `yaml:"otel"`
+	Log     Log     `yaml:"log"`
+	Dynamic Dynamic `yaml:"dynamic"` // optional; absent block == disabled, byte-identical behaviour
 }
 
 // Rule defines a single guardrail pattern.
@@ -48,6 +49,128 @@ type OTel struct {
 // Log configures the optional JSON-lines audit log.
 type Log struct {
 	Path string `yaml:"path"` // expanded with ~ → $HOME
+}
+
+// Dynamic configures the optional second-stage Jev semantic layer.
+// See data/barmkin-dynamic-hooks/report.md §5(b) for the full design;
+// this is the scoped-down demo subset (System One client, bash-only
+// gating, a two-question set, shadow/enforce, a per-session breaker).
+type Dynamic struct {
+	Enabled bool   `yaml:"enabled"` // master switch; absent block == false
+	Mode    string `yaml:"mode"`    // "shadow" (log would-be outcome, always pass) | "enforce"
+
+	Provider DynamicProvider `yaml:"provider"`
+	Gate     DynamicGate     `yaml:"gate"`
+
+	OnUnavailable       string            `yaml:"on_unavailable"`         // pass | escalate | deny (default: pass)
+	OnUnavailableByMode map[string]string `yaml:"on_unavailable_by_mode"` // per Claude Code permission_mode override
+
+	Breaker DynamicBreaker `yaml:"breaker"`
+
+	Thresholds map[string]float64 `yaml:"thresholds"` // override defaultQuestions[*].RejectAt by question id
+}
+
+// DynamicProvider is the System One wire-format endpoint and credential.
+type DynamicProvider struct {
+	BaseURL   string      `yaml:"base_url"` // e.g. https://openrouter.ai/api (no corporate proxy/gateway in this demo)
+	Model     string      `yaml:"model"`    // pin a version, e.g. "jev-1.13"; never an alias in enforce mode
+	Auth      DynamicAuth `yaml:"auth"`
+	TimeoutMs int         `yaml:"timeout_ms"` // hard deadline for the whole dynamic stage (default 1500)
+}
+
+// DynamicAuth is the credential source for the Jev bearer token.
+type DynamicAuth struct {
+	Type string `yaml:"type"` // bearer_file (default) | bearer_env | none
+	Path string `yaml:"path"` // bearer_file: must be 0600, owned by the user; never inside rules.yaml
+	Env  string `yaml:"env"`  // bearer_env: discouraged, visible to the agent's own Bash tool
+}
+
+// DynamicGate controls which calls reach the dynamic layer at all.
+type DynamicGate struct {
+	Tools           []string `yaml:"tools"`            // normalized tool names (default: ["bash"])
+	PermissionModes []string `yaml:"permission_modes"` // Claude Code permission_mode values that gate (default: auto/bypassPermissions/dontAsk)
+	SkipReadOnly    bool     `yaml:"skip_read_only"`   // built-in read-only fast path, per && ; | segment
+	SkipAllowRules  bool     `yaml:"skip_allow_rules"` // a matching regex allow rule bypasses the dynamic layer (D6)
+}
+
+// DynamicBreaker is the per-session circuit breaker that emulates
+// "manual mode" while Jev is unavailable: it can only make Barmkin
+// stricter, never loosen a verdict, so tampering with or deleting its
+// state file only triggers a fresh probe.
+type DynamicBreaker struct {
+	Enabled           bool `yaml:"enabled"`
+	OpenAfterFailures int  `yaml:"open_after_failures"` // consecutive unavailable results that open the breaker (default 1)
+	CooldownS         int  `yaml:"cooldown_s"`          // re-probe Jev after this long (default 60)
+}
+
+// applyDefaults fills in the documented defaults for an enabled dynamic
+// block. A disabled block (the zero value) is left untouched so the
+// zero-config path never even looks at these fields.
+func (d *Dynamic) applyDefaults() {
+	if !d.Enabled {
+		return
+	}
+	if d.Mode == "" {
+		d.Mode = "shadow"
+	}
+	if d.Provider.TimeoutMs <= 0 {
+		d.Provider.TimeoutMs = 1500
+	}
+	if d.Provider.Auth.Type == "" {
+		d.Provider.Auth.Type = "bearer_file"
+	}
+	if d.OnUnavailable == "" {
+		d.OnUnavailable = "pass"
+	}
+	if d.Breaker.OpenAfterFailures <= 0 {
+		d.Breaker.OpenAfterFailures = 1
+	}
+	if d.Breaker.CooldownS <= 0 {
+		d.Breaker.CooldownS = 60
+	}
+	if len(d.Gate.Tools) == 0 {
+		d.Gate.Tools = []string{"bash"}
+	}
+	if len(d.Gate.PermissionModes) == 0 {
+		d.Gate.PermissionModes = []string{"auto", "bypassPermissions", "dontAsk"}
+	}
+}
+
+// validateDynamicAuth prints a `barmkin validate` warning if the
+// bearer_file credential is missing or not 0600. It never prints the
+// key itself, only its source and permissions.
+func validateDynamicAuth(auth DynamicAuth) {
+	switch auth.Type {
+	case "bearer_file", "":
+		path := expandPath(auth.Path)
+		info, err := os.Stat(path)
+		if err != nil {
+			fmt.Printf("  ⚠ dynamic.provider.auth: key file %s: %v\n", auth.Path, err)
+			return
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			fmt.Printf("  ⚠ dynamic.provider.auth: key file %s has mode %#o, want 0600\n", auth.Path, perm)
+			return
+		}
+		fmt.Printf("  ✓ dynamic.provider.auth: bearer_file %s (0600)\n", auth.Path)
+	case "bearer_env":
+		if os.Getenv(auth.Env) == "" {
+			fmt.Printf("  ⚠ dynamic.provider.auth: env %s is unset\n", auth.Env)
+			return
+		}
+		fmt.Printf("  ✓ dynamic.provider.auth: bearer_env %s (set)\n", auth.Env)
+	case "none":
+		fmt.Println("  ✓ dynamic.provider.auth: none (gateway does auth)")
+	}
+}
+
+// dynamicStatus returns a human-readable summary for `barmkin validate`.
+func dynamicStatus(d Dynamic) string {
+	if !d.Enabled {
+		return "disabled"
+	}
+	return fmt.Sprintf("%s (provider=%s, model=%s, on_unavailable=%s)",
+		d.Mode, d.Provider.BaseURL, d.Provider.Model, d.OnUnavailable)
 }
 
 // compile validates the regex pattern and defaults Action to "deny".
@@ -80,6 +203,7 @@ func loadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("rule %q: %w", cfg.Rules[i].Name, err)
 		}
 	}
+	cfg.Dynamic.applyDefaults()
 	return &cfg, nil
 }
 

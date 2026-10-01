@@ -124,13 +124,18 @@ func cmdEval(configPath string) {
 	defer engine.close()
 	result := engine.evaluate(data)
 
-	if result.Decision == "deny" {
+	switch result.Decision {
+	case "deny":
 		msg := result.Reason
 		if msg == "" {
 			msg = fmt.Sprintf("blocked by rule: %s", result.Rule)
 		}
 		fmt.Fprintf(os.Stderr, "[barmkin] %s\n", msg)
 		os.Exit(2)
+	case "escalate":
+		// Forces a Claude Code permission prompt even in auto mode
+		// (>= v2.1.211). Exit 0: this is not a deny.
+		fmt.Println(renderEscalateJSON(result.Reason))
 	}
 }
 
@@ -178,8 +183,12 @@ func cmdValidate(configPath string) {
 		fmt.Printf("  ✓ %s\n", r.Name)
 	}
 
-	fmt.Printf("\notel: %s\n", otelStatus(cfg.OTel))
-	fmt.Printf("log:  %s\n", logStatus(cfg.Log))
+	fmt.Printf("\notel:    %s\n", otelStatus(cfg.OTel))
+	fmt.Printf("log:     %s\n", logStatus(cfg.Log))
+	fmt.Printf("dynamic: %s\n", dynamicStatus(cfg.Dynamic))
+	if cfg.Dynamic.Enabled {
+		validateDynamicAuth(cfg.Dynamic.Provider.Auth)
+	}
 
 	if warns > 0 {
 		fmt.Printf("\n%d warning(s)\n", warns)

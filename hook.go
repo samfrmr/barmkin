@@ -31,17 +31,18 @@ type Request struct {
 	EventType    string         `json:"event_type,omitempty"`
 
 	// Claude Code fields (from PreToolUse hook)
-	ToolName  string          `json:"tool_name"`
-	ToolInput json.RawMessage `json:"tool_input"`
-	Command   string          `json:"command"`
-	SessionID string          `json:"session_id"`
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	Command        string          `json:"command"`
+	SessionID      string          `json:"session_id"`
+	PermissionMode string          `json:"permission_mode,omitempty"` // e.g. "auto", "bypassPermissions", "dontAsk"
 }
 
 // HookOutput is the evaluation result returned by the engine.
 type HookOutput struct {
 	Decision string `json:"decision"`         // "allow" or "deny"
-	Reason   string `json:"reason,omitempty"`  // human-readable, shown to LLM on deny
-	Rule     string `json:"rule,omitempty"`    // rule name that matched
+	Reason   string `json:"reason,omitempty"` // human-readable, shown to LLM on deny
+	Rule     string `json:"rule,omitempty"`   // rule name that matched
 }
 
 // toolActions maps Claude Code tool names to semantic action names
@@ -131,13 +132,13 @@ func firstString(raw json.RawMessage, keys ...string) string {
 // This allows narrow allow rules to exempt specific patterns from
 // broad deny rules, e.g.:
 //
-//	- name: "allow-tmp-rm"
-//	  pattern: 'rm\s+-rf\s+/tmp/'
-//	  action: "allow"
+//   - name: "allow-tmp-rm"
+//     pattern: 'rm\s+-rf\s+/tmp/'
+//     action: "allow"
 //
-//	- name: "rm-rf-force"
-//	  pattern: 'rm\s+-rf\b'
-//	  action: "deny"
+//   - name: "rm-rf-force"
+//     pattern: 'rm\s+-rf\b'
+//     action: "deny"
 func match(content string, rules []Rule) *Rule {
 	var firstDeny *Rule
 	for i := range rules {
@@ -152,6 +153,20 @@ func match(content string, rules []Rule) *Rule {
 		}
 	}
 	return firstDeny
+}
+
+// matchedAllowRule reports whether an explicit regex allow rule fired
+// for content, independent of match()'s nil-on-allow-or-no-match
+// result. Used only by the dynamic layer's skip_allow_rules gate (D6),
+// so it costs nothing on the zero-config path where dynamic is
+// disabled and this is never called.
+func matchedAllowRule(content string, rules []Rule) bool {
+	for i := range rules {
+		if rules[i].Action == "allow" && rules[i].regex != nil && rules[i].regex.MatchString(content) {
+			return true
+		}
+	}
+	return false
 }
 
 // truncate shortens a string to n characters, appending "..." if truncated.
