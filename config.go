@@ -71,18 +71,26 @@ type Dynamic struct {
 }
 
 // DynamicProvider is the System One wire-format endpoint and credential.
+// base_url may be an internal gateway in front of a self-hosted model
+// (Tier A - the target posture once the model is hosted inside the
+// corporate boundary) or a direct provider (OpenRouter/TypeSafe/Vercel
+// - Tier B, now treated as an isolated-testing fallback). The gateway
+// must itself speak the System One wire format, or needs a format
+// adapter in front of it - see demo/README.md's open item.
 type DynamicProvider struct {
-	BaseURL   string      `yaml:"base_url"` // e.g. https://openrouter.ai/api (no corporate proxy/gateway in this demo)
+	BaseURL   string      `yaml:"base_url"` // internal gateway (Tier A) or a direct provider (Tier B fallback)
 	Model     string      `yaml:"model"`    // pin a version, e.g. "jev-1.13"; never an alias in enforce mode
 	Auth      DynamicAuth `yaml:"auth"`
 	TimeoutMs int         `yaml:"timeout_ms"` // hard deadline for the whole dynamic stage (default 1500)
+	Redact    string      `yaml:"redact"`     // "default" (apply built-in redaction before egress) | "off" (skip - e.g. data never leaves the corporate boundary via an internal gateway)
 }
 
 // DynamicAuth is the credential source for the Jev bearer token.
 type DynamicAuth struct {
-	Type string `yaml:"type"` // bearer_file (default) | bearer_env | none
-	Path string `yaml:"path"` // bearer_file: must be 0600, owned by the user; never inside rules.yaml
-	Env  string `yaml:"env"`  // bearer_env: discouraged, visible to the agent's own Bash tool
+	Type    string   `yaml:"type"`    // bearer_file (default) | bearer_env | command | none
+	Path    string   `yaml:"path"`    // bearer_file: must be 0600, owned by the user; never inside rules.yaml
+	Env     string   `yaml:"env"`     // bearer_env: discouraged, visible to the agent's own Bash tool
+	Command []string `yaml:"command"` // command: argv of a workload-identity/corp-token broker; stdout (trimmed) is the bearer token
 }
 
 // DynamicGate controls which calls reach the dynamic layer at all.
@@ -118,6 +126,9 @@ func (d *Dynamic) applyDefaults() {
 	}
 	if d.Provider.Auth.Type == "" {
 		d.Provider.Auth.Type = "bearer_file"
+	}
+	if d.Provider.Redact == "" {
+		d.Provider.Redact = "default"
 	}
 	if d.OnUnavailable == "" {
 		d.OnUnavailable = "pass"
@@ -159,6 +170,12 @@ func validateDynamicAuth(auth DynamicAuth) {
 			return
 		}
 		fmt.Printf("  ✓ dynamic.provider.auth: bearer_env %s (set)\n", auth.Env)
+	case "command":
+		if len(auth.Command) == 0 {
+			fmt.Println("  ⚠ dynamic.provider.auth: command is empty")
+			return
+		}
+		fmt.Printf("  ✓ dynamic.provider.auth: command %v (workload identity / corp token broker)\n", auth.Command)
 	case "none":
 		fmt.Println("  ✓ dynamic.provider.auth: none (gateway does auth)")
 	}
@@ -169,8 +186,8 @@ func dynamicStatus(d Dynamic) string {
 	if !d.Enabled {
 		return "disabled"
 	}
-	return fmt.Sprintf("%s (provider=%s, model=%s, on_unavailable=%s)",
-		d.Mode, d.Provider.BaseURL, d.Provider.Model, d.OnUnavailable)
+	return fmt.Sprintf("%s (provider=%s, model=%s, on_unavailable=%s, redact=%s)",
+		d.Mode, d.Provider.BaseURL, d.Provider.Model, d.OnUnavailable, d.Provider.Redact)
 }
 
 // compile validates the regex pattern and defaults Action to "deny".

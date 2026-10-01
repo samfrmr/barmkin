@@ -7,8 +7,13 @@
 // so this client is provider-neutral: base_url, model and the
 // credential source are all configuration (Dynamic.Provider).
 //
-// This demo client talks to base_url directly over HTTPS - no
-// corporate proxy or internal gateway - per the scoped-down POC brief.
+// This client talks to base_url over HTTPS - either an internal
+// gateway in front of a self-hosted model (Tier A, the target posture
+// once the model is hosted inside the corporate boundary - see D1/D3
+// revision 2026-10-01) or a direct provider (OpenRouter/TypeSafe,
+// Tier B, kept as an isolated-testing fallback). No corporate egress
+// proxy is configured by this client either way; point base_url at
+// the gateway and let it enforce network policy.
 //
 // Jev must never be the component that permits: it answers predefined
 // yes/no (Noul) questions with a probability, and composition code
@@ -26,6 +31,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -156,6 +162,24 @@ func resolveJevKey(auth DynamicAuth) (string, error) {
 			return "", &jevError{kind: "no_key", err: fmt.Errorf("%s is empty", auth.Env)}
 		}
 		return v, nil
+	case "command":
+		// Workload identity / a short-lived token from a corporate
+		// broker (Tier A target credential model). stdout (trimmed)
+		// is the bearer token; a nonzero exit or empty output is a
+		// normal "no_key" failure, routed through on_unavailable like
+		// any other transport failure.
+		if len(auth.Command) == 0 {
+			return "", &jevError{kind: "no_key", err: errors.New("auth.command not set")}
+		}
+		out, err := exec.Command(auth.Command[0], auth.Command[1:]...).Output()
+		if err != nil {
+			return "", &jevError{kind: "no_key", err: fmt.Errorf("auth.command: %w", err)}
+		}
+		token := strings.TrimSpace(string(out))
+		if token == "" {
+			return "", &jevError{kind: "no_key", err: errors.New("auth.command produced no token")}
+		}
+		return token, nil
 	case "bearer_file", "":
 		path := auth.Path
 		if path == "" {
