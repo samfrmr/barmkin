@@ -1039,6 +1039,12 @@ func TestEvalOutput_EscalateIsAskOnlyForClaudeCode(t *testing.T) {
 		t.Errorf("claude-code escalate: got stdout=%q stderr=%q code=%d, want ask JSON with exit 0", stdout, stderr, code)
 	}
 
+	subagent := `{"tool_name":"Bash","tool_input":{"command":"npm publish"},"session_id":"s-cc","agent_id":"subagent-42","permission_mode":"auto"}`
+	stdout, stderr, code = renderEvalOutput(newEngine(cfg).evaluate([]byte(subagent)))
+	if code != 0 || stderr != "" || !strings.Contains(stdout, `"permissionDecision":"ask"`) {
+		t.Errorf("claude-code subagent escalate: got stdout=%q stderr=%q code=%d, want ask JSON with exit 0", stdout, stderr, code)
+	}
+
 	opencode := `{"trajectory_id":"s-oc","tool":"bash","action":"ShellCommand","args":{"command":"npm publish"}}`
 	stdout, stderr, code = renderEvalOutput(newEngine(cfg).evaluate([]byte(opencode)))
 	if code != 2 || stdout != "" || !strings.Contains(stderr, "no_outward_effect") {

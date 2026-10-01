@@ -40,10 +40,10 @@ type Request struct {
 
 // HookOutput is the evaluation result returned by the engine.
 type HookOutput struct {
-	Decision string `json:"decision"`         // "allow" or "deny"
-	Reason   string `json:"reason,omitempty"` // human-readable, shown to LLM on deny
-	Rule     string `json:"rule,omitempty"`   // rule name that matched
-	Agent    string `json:"-"`                // normalized agent_id; only Claude Code can render escalate as ask
+	Decision   string `json:"decision"`         // "allow" or "deny"
+	Reason     string `json:"reason,omitempty"` // human-readable, shown to LLM on deny
+	Rule       string `json:"rule,omitempty"`   // rule name that matched
+	ClaudeCode bool   `json:"-"`                // request arrived in Claude Code's PreToolUse wire format; only it can render escalate as ask
 }
 
 // toolActions maps Claude Code tool names to semantic action names
@@ -71,12 +71,19 @@ func (r *Request) normalize() {
 		// Infer agent from wire format: Claude Code uses tool_name/session_id;
 		// opencode uses trajectory_id/args. Default to opencode when neither
 		// Claude Code field is present.
-		if r.ToolName != "" || r.SessionID != "" {
+		if r.isClaudeCode() {
 			r.AgentID = "claude-code"
 		} else {
 			r.AgentID = "opencode"
 		}
 	}
+}
+
+// isClaudeCode reports whether the request arrived in Claude Code's
+// PreToolUse wire format (tool_name/session_id), independent of any
+// agent_id it carries (Claude Code sets agent_id for subagent calls).
+func (r *Request) isClaudeCode() bool {
+	return r.ToolName != "" || r.SessionID != ""
 }
 
 // extractContent pulls the scannable text from the request.

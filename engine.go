@@ -80,7 +80,7 @@ func (e *Engine) evaluate(input []byte) HookOutput {
 	}
 
 	e.record(req, result, content, start, dyn)
-	result.Agent = req.AgentID
+	result.ClaudeCode = req.isClaudeCode()
 	return result
 }
 

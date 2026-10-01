@@ -146,7 +146,7 @@ func cmdEval(configPath string) {
 // no way to express an ask, so escalate is rendered as a deny there.
 func renderEvalOutput(result HookOutput) (stdout, stderr string, code int) {
 	switch {
-	case result.Decision == "escalate" && result.Agent == "claude-code":
+	case result.Decision == "escalate" && result.ClaudeCode:
 		return renderEscalateJSON(result.Reason), "", 0
 	case result.Decision == "deny", result.Decision == "escalate":
 		msg := result.Reason
