@@ -324,6 +324,31 @@ func TestEnforceMode_ActsOnComposition(t *testing.T) {
 	}
 }
 
+func TestEnforceMode_BypassPermissionsTurnsComposedEscalateIntoDeny(t *testing.T) {
+	withTempHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.01})
+	}))
+	defer srv.Close()
+
+	keyPath := writeKeyFile(t, "test-key")
+	cfg := Dynamic{
+		Enabled: true, Mode: "enforce", OnUnavailable: "escalate",
+		OnUnavailableByMode: map[string]string{"bypassPermissions": "deny"},
+		Provider:            DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500},
+	}
+
+	res := runDynamic(cfg, Request{Tool: "bash", TrajectoryID: "bypass-sess", PermissionMode: "bypassPermissions"}, "npm publish")
+	if res.Outcome != Deny || res.WouldDecision != Deny || res.DecidingQuestion != "no_outward_effect" {
+		t.Errorf("bypassPermissions: got outcome=%v would=%v deciding=%q, want Deny/Deny/no_outward_effect", res.Outcome, res.WouldDecision, res.DecidingQuestion)
+	}
+
+	res = runDynamic(cfg, Request{Tool: "bash", TrajectoryID: "auto-sess", PermissionMode: "auto"}, "npm publish")
+	if res.Outcome != Escalate {
+		t.Errorf("auto: got outcome=%v, want Escalate", res.Outcome)
+	}
+}
+
 // ── Breaker ─────────────────────────────────────────────────────────────
 
 func withTempHome(t *testing.T) {

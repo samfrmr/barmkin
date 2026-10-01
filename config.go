@@ -63,7 +63,7 @@ type Dynamic struct {
 	Gate     DynamicGate     `yaml:"gate"`
 
 	OnUnavailable       string            `yaml:"on_unavailable"`         // pass | escalate | deny (default: pass)
-	OnUnavailableByMode map[string]string `yaml:"on_unavailable_by_mode"` // per Claude Code permission_mode override
+	OnUnavailableByMode map[string]string `yaml:"on_unavailable_by_mode"` // per Claude Code permission_mode override; "deny" also turns a composed Escalate into Deny
 
 	Breaker DynamicBreaker `yaml:"breaker"`
 
@@ -87,9 +87,8 @@ type DynamicProvider struct {
 
 // DynamicAuth is the credential source for the Jev bearer token.
 type DynamicAuth struct {
-	Type    string   `yaml:"type"`    // bearer_file (default) | bearer_env | command | none
+	Type    string   `yaml:"type"`    // bearer_file (default) | command | none
 	Path    string   `yaml:"path"`    // bearer_file: must be 0600, owned by the user; never inside rules.yaml
-	Env     string   `yaml:"env"`     // bearer_env: discouraged, visible to the agent's own Bash tool
 	Command []string `yaml:"command"` // command: argv of a workload-identity/corp-token broker; stdout (trimmed) is the bearer token
 }
 
@@ -164,12 +163,6 @@ func validateDynamicAuth(auth DynamicAuth) {
 			return
 		}
 		fmt.Printf("  ✓ dynamic.provider.auth: bearer_file %s (0600)\n", auth.Path)
-	case "bearer_env":
-		if os.Getenv(auth.Env) == "" {
-			fmt.Printf("  ⚠ dynamic.provider.auth: env %s is unset\n", auth.Env)
-			return
-		}
-		fmt.Printf("  ✓ dynamic.provider.auth: bearer_env %s (set)\n", auth.Env)
 	case "command":
 		if len(auth.Command) == 0 {
 			fmt.Println("  ⚠ dynamic.provider.auth: command is empty")
@@ -178,6 +171,8 @@ func validateDynamicAuth(auth DynamicAuth) {
 		fmt.Printf("  ✓ dynamic.provider.auth: command %v (workload identity / corp token broker)\n", auth.Command)
 	case "none":
 		fmt.Println("  ✓ dynamic.provider.auth: none (gateway does auth)")
+	default:
+		fmt.Printf("  ⚠ dynamic.provider.auth: unknown type %q\n", auth.Type)
 	}
 }
 

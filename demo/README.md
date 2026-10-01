@@ -109,7 +109,8 @@ default to an internal gateway):
 - **Shadow → enforce flip:** `demo/rules-shadow.yaml` always passes and
   logs what it would have done; `demo/rules-enforce.yaml` acts on the
   composition and fails closed-to-manual (`escalate`) when Jev is
-  unreachable, with `bypassPermissions` mapped to `deny` until a human
+  unreachable, with `bypassPermissions` mapped to `deny` (for both
+  on_unavailable and a composed soft-question escalation) until a human
   verifies hook `ask` is honoured there (report.md §5c). A per-session
   breaker (`~/.barmkin/state/<session>.json`, 0600, atomic
   write-then-rename) opens after one consecutive failure and

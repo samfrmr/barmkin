@@ -153,15 +153,6 @@ func resolveJevKey(auth DynamicAuth) (string, error) {
 	switch auth.Type {
 	case "none":
 		return "", nil
-	case "bearer_env":
-		if auth.Env == "" {
-			return "", &jevError{kind: "no_key", err: errors.New("auth.env not set")}
-		}
-		v := os.Getenv(auth.Env)
-		if v == "" {
-			return "", &jevError{kind: "no_key", err: fmt.Errorf("%s is empty", auth.Env)}
-		}
-		return v, nil
 	case "command":
 		// Workload identity / a short-lived token from a corporate
 		// broker (Tier A target credential model). stdout (trimmed)

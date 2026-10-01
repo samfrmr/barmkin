@@ -209,6 +209,9 @@ func runDynamic(cfg Dynamic, req Request, content string) *dynamicResult {
 	resetBreaker(cfg.Breaker, sessionID, st)
 	res.Probabilities = probs
 	outcome, deciding := composeOutcome(cfg, probs)
+	if outcome == Escalate && cfg.OnUnavailableByMode[req.PermissionMode] == "deny" {
+		outcome = Deny
+	}
 	res.WouldDecision = outcome
 	res.DecidingQuestion = deciding
 	if cfg.Mode == "enforce" {
