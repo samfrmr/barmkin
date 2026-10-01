@@ -134,7 +134,17 @@ func (r *Request) extractContent() string {
 		b, _ := json.Marshal(r.Args)
 		return string(b)
 	}
+	if readOnlyActions[r.Action] {
+		return ""
+	}
 	return strings.TrimSpace(string(r.ToolInput))
+}
+
+// readOnlyActions are the toolActions whose remaining tool_input
+// (e.g. a Grep/Glob search pattern) is data being searched for, never
+// a scan target.
+var readOnlyActions = map[string]bool{
+	"FileRead": true, "FileSearch": true, "ContentSearch": true,
 }
 
 // fileMutatingTools are the (lowercased) Claude Code and Copilot CLI

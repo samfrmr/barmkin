@@ -273,6 +273,9 @@ func TestEngine_EvaluateSearchTools_PatternNotScanned(t *testing.T) {
 		{"tool_name": "Grep", "tool_input": map[string]any{"pattern": "rm -rf", "path": "."}},
 		{"tool_name": "Grep", "tool_input": map[string]any{"pattern": "DROP TABLE", "path": "."}},
 		{"tool_name": "Glob", "tool_input": map[string]any{"pattern": "**/.env"}},
+		{"tool_name": "Grep", "tool_input": map[string]any{"pattern": "rm -rf"}},
+		{"tool_name": "Grep", "tool_input": map[string]any{"pattern": "DROP TABLE"}},
+		{"tool_name": "Glob", "tool_input": map[string]any{"pattern": "**/.env", "path": "."}},
 	}
 	for _, in := range cases {
 		input, _ := json.Marshal(in)
