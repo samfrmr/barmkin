@@ -113,7 +113,6 @@ type jevClient struct {
 	model   string
 	key     string
 	client  *http.Client
-	timeout time.Duration
 }
 
 // providerTimeout is provider.timeout_ms as a duration: the single
@@ -140,7 +139,6 @@ func newJevClient(ctx context.Context, cfg DynamicProvider) (*jevClient, error) 
 		baseURL: strings.TrimSuffix(cfg.BaseURL, "/"),
 		model:   cfg.Model,
 		key:     key,
-		timeout: providerTimeout(cfg),
 		client: &http.Client{
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return errRedirect

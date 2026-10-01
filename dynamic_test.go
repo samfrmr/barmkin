@@ -731,7 +731,7 @@ func TestJevClient_Timeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	_, _, _, err = client.ask(ctx, map[string]string{"command": "ls"}, map[string]jevQuestion{"no_secret_egress": {Type: "noul"}, "no_outward_effect": {Type: "noul"}})
 	if kind := errKind(err); kind != "timeout" && kind != "network" {
@@ -745,7 +745,7 @@ func TestJevClient_RefusesSendingKeyInBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_, _, _, err = client.ask(ctx, map[string]string{"command": "echo my-secret-key"}, map[string]jevQuestion{"x": {Type: "noul"}})
 	if errKind(err) != "refused_send" {
@@ -764,7 +764,7 @@ func TestJevClient_ValidResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	probs, model, _, err := client.ask(ctx, map[string]string{"command": "ls"}, map[string]jevQuestion{"no_secret_egress": {Type: "noul"}, "no_outward_effect": {Type: "noul"}})
 	if err != nil {
@@ -804,7 +804,7 @@ func TestJevClient_RequestIncludesInstructionsPerQuestion(t *testing.T) {
 		"no_secret_egress":  {Type: "noul", Instructions: "Is the command free of any transmission of credentials, keys, or tokens to a network endpoint?"},
 		"no_outward_effect": {Type: "noul", Instructions: "Is the command's effect confined to this machine?"},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	if _, _, _, err := client.ask(ctx, map[string]string{"command": "ls"}, questions); err != nil {
 		t.Fatal(err)
@@ -986,7 +986,7 @@ func assertAskErrorKind(t *testing.T, baseURL, wantKind string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_, _, _, askErr := client.ask(ctx, map[string]string{"command": "ls"}, map[string]jevQuestion{"no_secret_egress": {Type: "noul"}, "no_outward_effect": {Type: "noul"}})
 	if askErr == nil {
@@ -1004,7 +1004,7 @@ func assertAskSucceeds(t *testing.T, baseURL string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	questions := map[string]jevQuestion{}
 	for _, q := range defaultQuestions {
