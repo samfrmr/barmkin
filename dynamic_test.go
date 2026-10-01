@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -419,7 +422,7 @@ func TestJevClient_KeyFileWrongPermissions(t *testing.T) {
 }
 
 func TestJevClient_HTTPErrors(t *testing.T) {
-	for _, code := range []int{401, 403, 422, 429, 529, 500} {
+	for _, code := range []int{400, 401, 403, 422, 429, 529, 500} {
 		t.Run(fmt.Sprintf("http_%d", code), func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(code)
@@ -520,6 +523,108 @@ func TestJevClient_ValidResponse(t *testing.T) {
 	}
 }
 
+func TestJevClient_RequestIncludesInstructionsPerQuestion(t *testing.T) {
+	// TypeSafe's System One schema rejects a question with no
+	// "instructions" key at all (400 invalid_union on
+	// questions.*.instructions: expected string, received undefined).
+	// This asserts the wire bytes actually carry the key, not just
+	// that the Go struct round-trips.
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9})
+	}))
+	defer srv.Close()
+
+	// A longer, non-dictionary-substring stand-in key: a trivial "k"
+	// would itself be a substring of the word "keys" in the real
+	// instructions text below, and trip the refused_send credential
+	// check this client correctly applies.
+	keyPath := writeKeyFile(t, "zz-test-token-93f1")
+	client, err := newJevClient(DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	questions := map[string]jevQuestion{
+		"no_secret_egress":  {Type: "noul", Instructions: "Does the command send credentials, keys, or tokens to a network endpoint?"},
+		"no_outward_effect": {Type: "noul", Instructions: "Does the command have any effect outside this machine?"},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
+	defer cancel()
+	if _, _, _, err := client.ask(ctx, map[string]string{"command": "ls"}, questions); err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Contains(gotBody, []byte(`"instructions"`)) {
+		t.Fatalf("request body missing the \"instructions\" key entirely: %s", gotBody)
+	}
+
+	var sent systemOneRequest
+	if err := json.Unmarshal(gotBody, &sent); err != nil {
+		t.Fatalf("request body not valid JSON: %v", err)
+	}
+	for id, want := range questions {
+		got, ok := sent.Questions[id]
+		if !ok {
+			t.Fatalf("request missing question %q", id)
+		}
+		if got.Instructions != want.Instructions {
+			t.Errorf("question %q instructions = %q, want %q", id, got.Instructions, want.Instructions)
+		}
+	}
+}
+
+func TestJevQuestion_AlwaysMarshalsInstructionsKey(t *testing.T) {
+	// Regression guard for the OpenRouter 400 (invalid_union on
+	// questions.*.instructions: expected string, received undefined):
+	// the field must never be dropped by omitempty, even when its
+	// Go zero value (empty string) is used.
+	b, err := json.Marshal(jevQuestion{Type: "noul"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"instructions"`)) {
+		t.Errorf("jevQuestion{} marshaled without the instructions key: %s", b)
+	}
+}
+
+func TestJevClient_MissingInstructions400(t *testing.T) {
+	// A server that actually enforces the TypeSafe schema (what
+	// OpenRouter did against the pre-fix client) 400s on a request
+	// missing the key; the client must classify that as http_400.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]any
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &raw)
+		questions, _ := raw["questions"].(map[string]any)
+		for _, q := range questions {
+			qm, _ := q.(map[string]any)
+			if _, ok := qm["instructions"]; !ok {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":{"message":"invalid_union on questions.*.instructions: expected string, received undefined"}}`))
+				return
+			}
+		}
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9})
+	}))
+	defer srv.Close()
+	// The current client always sends the key (see the marshal test
+	// above), so this exercises the http_400 classification path
+	// directly via the generic matrix in TestJevClient_HTTPErrors;
+	// here we additionally confirm a real client call against this
+	// schema-enforcing stub succeeds, proving the fix actually
+	// satisfies the validation the live endpoint performs.
+	assertAskSucceeds(t, srv.URL)
+}
+
+func TestDefaultQuestions_AllHaveInstructions(t *testing.T) {
+	for _, q := range defaultQuestions {
+		if strings.TrimSpace(q.Instructions) == "" {
+			t.Errorf("question %q has no instructions; TypeSafe's wire format requires one per question", q.ID)
+		}
+	}
+}
+
 // ── Redaction ───────────────────────────────────────────────────────────
 
 func TestRedact(t *testing.T) {
@@ -583,5 +688,23 @@ func assertAskErrorKind(t *testing.T, baseURL, wantKind string) {
 	}
 	if kind := errKind(askErr); kind != wantKind {
 		t.Errorf("got kind %q (%v), want %q", kind, askErr, wantKind)
+	}
+}
+
+func assertAskSucceeds(t *testing.T, baseURL string) {
+	t.Helper()
+	keyPath := writeKeyFile(t, "zz-test-token-93f1") // see note in TestJevClient_RequestIncludesInstructionsPerQuestion
+	client, err := newJevClient(DynamicProvider{BaseURL: baseURL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
+	defer cancel()
+	questions := map[string]jevQuestion{}
+	for _, q := range defaultQuestions {
+		questions[q.ID] = jevQuestion{Type: "noul", Instructions: q.Instructions}
+	}
+	if _, _, _, err := client.ask(ctx, map[string]string{"command": "ls"}, questions); err != nil {
+		t.Errorf("ask() against a schema-enforcing stub failed: %v", err)
 	}
 }
