@@ -110,12 +110,19 @@ default to an internal gateway):
   composition and fails closed-to-manual (`escalate`) when Jev is
   unreachable, with `bypassPermissions` mapped to `deny` (for both
   on_unavailable and a composed soft-question escalation) until a human
-  verifies hook `ask` is honoured there (report.md §5c). A per-session
+  verifies hook `ask` is honoured there (report.md §5c). Only Claude
+  Code can render `escalate` as an `ask` prompt; for any other agent
+  (e.g. the opencode plugin, which treats every exit 0 as allow)
+  `barmkin eval` renders `escalate` as a deny (exit 2). A per-session
   breaker (`~/.barmkin/state/<session>.json`, 0600, atomic
-  write-then-rename) opens after one consecutive failure and
-  short-circuits further network calls until its cooldown elapses -
+  write-then-rename) opens after one consecutive availability failure
+  and short-circuits further network calls until its cooldown elapses -
   this is what "the breaker opening when the key is pulled or timeout
-  hits" looks like in practice.
+  hits" looks like in practice. A `refused_send` (the outgoing body
+  contained the bearer key or a `PRIVATE KEY` marker) is a content
+  refusal, not an outage: it goes through on_unavailable for that call
+  only and never counts toward the breaker. `provider.timeout_ms` is
+  one deadline shared by `auth.command` and the HTTP request.
 - **Audit log:** gains `decision: "escalate"`, a `layer` field
   (`"dynamic"` when this stage ran, absent/omitted otherwise), and a
   `dynamic` block with the outcome, would-be decision, error kind,
