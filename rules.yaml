@@ -112,11 +112,12 @@ rules:
     example: "history -c"
 
   # ── Sensitive file paths (Write/Edit file_path, not just shell redirects) ─
-  # hook.go's extractContent now surfaces Claude Code's Write/Edit
-  # file_path (report.md §2.7: previously only shell-redirect forms like
-  # the authorized-keys rule above caught this). These match the bare
-  # target path a file tool sends, so an Edit/Write aimed directly at
-  # one of these files is denied even with no shell command involved.
+  # hook.go's scanTargets matches each file-mutating tool field (path,
+  # content, new_string, ...) on its own (report.md §2.7: previously only
+  # shell-redirect forms like the authorized-keys rule above caught this).
+  # These match the bare target path a file tool sends, so an Edit/Write
+  # aimed directly at one of these files is denied even with no shell
+  # command involved.
   # Anchored start-to-end with no embedded whitespace (^[^\s]*...$) so
   # they match a bare path only, never a shell command that happens to
   # mention one in passing (e.g. "cat ~/.env", already covered by

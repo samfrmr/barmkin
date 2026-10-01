@@ -6,7 +6,7 @@ Runs as a subprocess per invocation. Config is a YAML file of regex rules.
 
 ## Scope
 
-Barmkin matches command strings. It does not read file contents or inspect command output. If you need semantic evaluation of what an agent writes or retrieves, use sondera, which adds Cedar policies and LLM classification on top.
+Barmkin matches the strings in a tool call: shell commands, plus the target path and written payload (`content`, `new_string`, ...) of file-mutating tools such as Write and Edit. Search patterns of read-only tools (Grep, Glob) are never scanned. It does not read files from disk or inspect command output. If you need semantic evaluation of what an agent writes or retrieves, use sondera, which adds Cedar policies and LLM classification on top.
 
 An optional, off-by-default dynamic layer (`dynamic:` in rules.yaml) can ask a hosted classifier yes/no hazard questions about gated shell commands. It can only tighten a verdict to escalate or deny, never allow. See [demo/README.md](demo/README.md).
 
