@@ -74,6 +74,7 @@ Edit `/etc/barmkin/rules.yaml`:
   action: "deny"                      # or "allow" to override deny rules
   reason: "Why it's blocked"
   example: "dangerous command --flag"  # must match, verified by tests
+  # target: "path"                    # optional: file-tool target path only, never payloads
 ```
 
 Run `barmkin validate` after editing.
