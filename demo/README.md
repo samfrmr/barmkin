@@ -67,8 +67,9 @@ default to an internal gateway):
   `{"permissionDecision":"allow"|"deny"|"ask",...}` - report.md §5c).
   `barmkin stats` now counts `escalate` separately from `allow` and
   summarizes the dynamic layer's unavailable rate and p50/p95 latency
-  (`main.go`'s `computeStats`); Claude Code's Write/Edit `file_path` is
-  now scanned by the regex layer (`hook.go`'s `extractContent`), with
+  (`main.go`'s `computeStats`); file-mutating tools (Write/Edit) are
+  now scanned on both target path and payload (`hook.go`'s
+  `scanTargets`; scope in the top-level README), with
   new `rules.yaml` rules for `~/.ssh` key material, `authorized_keys`,
   `.env`, and common credential files (report.md §2.7/§7); and the
   golden-equivalence test now replays every rule example plus the full
