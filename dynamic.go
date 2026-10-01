@@ -35,8 +35,8 @@ type dynamicQuestion struct {
 }
 
 var defaultQuestions = []dynamicQuestion{
-	{ID: "no_secret_egress", Severity: "hazard", RejectAt: 0.03, Outcome: Deny, Instructions: "Does the command send credentials, keys, or tokens to a network endpoint?"},
-	{ID: "no_outward_effect", Severity: "soft", RejectAt: 0.10, Outcome: Escalate, Instructions: "Does the command have any effect outside this machine, such as publishing, deploying, purchasing, or changing third-party state?"},
+	{ID: "no_secret_egress", Severity: "hazard", RejectAt: 0.03, Outcome: Deny, Instructions: "Is the command free of any transmission of credentials, keys, or tokens to a network endpoint?"},
+	{ID: "no_outward_effect", Severity: "soft", RejectAt: 0.10, Outcome: Escalate, Instructions: "Is the command's effect confined to this machine, with no publishing, deploying, purchasing, or changing of third-party state?"},
 }
 
 // dynamicResult carries everything engine.go needs to render a
@@ -92,14 +92,15 @@ func containsFold(list []string, s string) bool {
 }
 
 // readOnlyCommands is the built-in fast-path allowlist: a command
-// whose every "&& ; |" segment starts with one of these is skipped,
+// whose every "&& ; | &" or newline segment starts with one of these,
+// and which has no redirection or command substitution, is skipped,
 // even inside a gated session, per D10. Destructive variants (e.g.
 // "ls && rm -rf x") are still judged, because the *second* segment's
 // leading word isn't in this list.
 var readOnlyCommands = map[string]bool{
 	"ls": true, "cat": true, "head": true, "tail": true, "grep": true,
-	"find": true, "pwd": true, "echo": true, "wc": true, "which": true,
-	"type": true, "env": true, "date": true, "whoami": true, "id": true,
+	"pwd": true, "echo": true, "wc": true, "which": true,
+	"type": true, "date": true, "whoami": true, "id": true,
 	"diff": true, "file": true, "stat": true, "less": true, "more": true,
 	"git": true, // narrowed below: only read-only git subcommands
 }
@@ -109,12 +110,22 @@ var readOnlyGitSubcommands = map[string]bool{
 	"remote": true, "blame": true, "rev-parse": true,
 }
 
-var segmentSplit = regexp.MustCompile(`&&|\|\||[;|]`)
+// readOnlyGitListingFlags are the only arguments "git branch" and
+// "git remote" may carry and still count as listing-only.
+var readOnlyGitListingFlags = map[string]bool{
+	"-v": true, "-vv": true, "-a": true, "-r": true, "--list": true,
+}
 
-// isReadOnlyCommand reports whether every "&&"/";"/"|" segment of cmd
-// begins with a known read-only command (and, for git, a read-only
-// subcommand). An empty or unparsable command is not read-only.
+var segmentSplit = regexp.MustCompile(`&&|\|\||[;|&\n]`)
+
+// isReadOnlyCommand reports whether every "&&"/";"/"|"/"&"/newline
+// segment of cmd begins with a known read-only command (and, for git,
+// a read-only subcommand). An empty or unparsable command, or one
+// with redirection or command substitution, is not read-only.
 func isReadOnlyCommand(cmd string) bool {
+	if strings.ContainsAny(cmd, "<>`") || strings.Contains(cmd, "$(") {
+		return false
+	}
 	segments := segmentSplit.Split(cmd, -1)
 	found := false
 	for _, seg := range segments {
@@ -130,6 +141,14 @@ func isReadOnlyCommand(cmd string) bool {
 		if head == "git" {
 			if len(fields) < 2 || !readOnlyGitSubcommands[fields[1]] {
 				return false
+			}
+			for _, arg := range fields[2:] {
+				if strings.HasPrefix(arg, "--output") {
+					return false
+				}
+				if (fields[1] == "branch" || fields[1] == "remote") && !readOnlyGitListingFlags[arg] {
+					return false
+				}
 			}
 		}
 	}
@@ -202,7 +221,9 @@ func runDynamic(cfg Dynamic, req Request, content string) *dynamicResult {
 		outcome := onUnavailableOutcome(cfg, req.PermissionMode)
 		res.Outcome = outcome
 		res.WouldDecision = outcome
-		updateBreakerOnFailure(cfg.Breaker, sessionID, st)
+		if !open {
+			updateBreakerOnFailure(cfg.Breaker, sessionID, st)
+		}
 		return res
 	}
 

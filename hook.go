@@ -149,10 +149,16 @@ func firstNonEmpty(m map[string]any, keys ...string) string {
 }
 
 // firstString unmarshals a JSON RawMessage into a map and returns the
-// first non-empty string value for any of the given keys.
+// first non-empty string value for any of the given keys. A JSON
+// string holding an encoded object (Copilot CLI's toolArgs) is
+// decoded first.
 func firstString(raw json.RawMessage, keys ...string) string {
 	if len(raw) == 0 {
 		return ""
+	}
+	var encoded string
+	if json.Unmarshal(raw, &encoded) == nil {
+		raw = json.RawMessage(encoded)
 	}
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {

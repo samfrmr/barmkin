@@ -123,13 +123,13 @@ type jevClient struct {
 // like any other transport failure, never panics or falls back to an
 // implicit allow.
 func newJevClient(cfg DynamicProvider) (*jevClient, error) {
-	key, err := resolveJevKey(cfg.Auth)
-	if err != nil {
-		return nil, err
-	}
 	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 1500 * time.Millisecond
+	}
+	key, err := resolveJevKey(cfg.Auth, timeout)
+	if err != nil {
+		return nil, err
 	}
 	return &jevClient{
 		baseURL: strings.TrimSuffix(cfg.BaseURL, "/"),
@@ -149,20 +149,24 @@ func newJevClient(cfg DynamicProvider) (*jevClient, error) {
 // requires the file to exist with mode 0600 (D3): any looser
 // permission is treated as "no key" rather than silently trusting a
 // key any local process could have tampered with or read.
-func resolveJevKey(auth DynamicAuth) (string, error) {
+func resolveJevKey(auth DynamicAuth, timeout time.Duration) (string, error) {
 	switch auth.Type {
 	case "none":
 		return "", nil
 	case "command":
 		// Workload identity / a short-lived token from a corporate
 		// broker (Tier A target credential model). stdout (trimmed)
-		// is the bearer token; a nonzero exit or empty output is a
-		// normal "no_key" failure, routed through on_unavailable like
+		// is the bearer token; a nonzero exit, exceeding timeout_ms, or
+		// empty output is a normal "no_key" failure, routed through on_unavailable like
 		// any other transport failure.
 		if len(auth.Command) == 0 {
 			return "", &jevError{kind: "no_key", err: errors.New("auth.command not set")}
 		}
-		out, err := exec.Command(auth.Command[0], auth.Command[1:]...).Output()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, auth.Command[0], auth.Command[1:]...)
+		cmd.WaitDelay = 100 * time.Millisecond
+		out, err := cmd.Output()
 		if err != nil {
 			return "", &jevError{kind: "no_key", err: fmt.Errorf("auth.command: %w", err)}
 		}

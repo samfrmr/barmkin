@@ -105,9 +105,10 @@ install_copilot_cli() {
   local tmp; tmp=$(mktemp)
   cat > "$tmp" <<JSON
 {
+  "version": 1,
   "hooks": {
     "preToolUse": [
-      { "command": "$sys_bin eval" }
+      { "type": "command", "bash": "$sys_bin eval", "timeoutSec": 10 }
     ]
   }
 }

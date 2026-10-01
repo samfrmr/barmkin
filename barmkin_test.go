@@ -144,6 +144,11 @@ func TestExtractContent(t *testing.T) {
 			Request{ToolNameCamel: "Bash", ToolArgsCamel: []byte(`{"command":"ls -la"}`)},
 			"ls -la",
 		},
+		{
+			"copilot-cli string-encoded toolArgs command",
+			Request{ToolNameCamel: "bash", ToolArgsCamel: []byte(`"{\"command\":\"rm -rf /\"}"`)},
+			"rm -rf /",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,6 +227,18 @@ func TestEngine_EvaluateCopilotCLI_Deny(t *testing.T) {
 	input, _ := json.Marshal(map[string]any{
 		"toolName": "Bash",
 		"toolArgs": map[string]any{"command": "rm -rf /tmp"},
+	})
+	r := e.evaluate(input)
+	if r.Decision != "deny" || r.AgentID != "copilot-cli" {
+		t.Errorf("got %+v", r)
+	}
+}
+
+func TestEngine_EvaluateCopilotCLI_StringEncodedToolArgsDeny(t *testing.T) {
+	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
+	input, _ := json.Marshal(map[string]any{
+		"toolName": "bash",
+		"toolArgs": `{"command":"rm -rf /"}`,
 	})
 	r := e.evaluate(input)
 	if r.Decision != "deny" || r.AgentID != "copilot-cli" {

