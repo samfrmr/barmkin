@@ -1,9 +1,11 @@
 // Barmkin - lightweight regex guardrail for AI coding agents.
 //
-// Barmkin evaluates tool calls from Claude Code and opencode before they execute.
-// It matches the command content against a set of regex rules and blocks
-// (exit 2) or allows (exit 0) the call. No daemon, no LLM, no network -
-// just regex, sub-millisecond per evaluation.
+// Barmkin evaluates tool calls from Claude Code, opencode, and GitHub
+// Copilot CLI before they execute. It matches the command content against
+// a set of regex rules and blocks (exit 2) or allows (exit 0) the call.
+// No daemon, no network by default - just regex, sub-millisecond per
+// evaluation. The optional dynamic layer (dynamic.go) can additionally
+// escalate or deny gated shell commands via a hosted classifier.
 //
 // Usage:
 //
@@ -25,6 +27,10 @@
 //
 //	Opencode spawns barmkin eval as a subprocess from the TS plugin
 //	(barmkin.ts) on every tool.execute.before event.
+//
+//	Copilot CLI pipes {"toolName":"...","toolArgs":...} from its
+//	preToolUse hook; barmkin always replies with explicit
+//	{"permissionDecision":...} JSON on stdout (renderCopilotCLIOutput).
 package main
 
 import (

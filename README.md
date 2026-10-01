@@ -8,6 +8,8 @@ Runs as a subprocess per invocation. Config is a YAML file of regex rules.
 
 Barmkin matches command strings. It does not read file contents or inspect command output. If you need semantic evaluation of what an agent writes or retrieves, use sondera, which adds Cedar policies and LLM classification on top.
 
+An optional, off-by-default dynamic layer (`dynamic:` in rules.yaml) can ask a hosted classifier yes/no hazard questions about gated shell commands. It can only tighten a verdict to escalate or deny, never allow. See [demo/README.md](demo/README.md).
+
 ## Why the name?
 
 A barmkin is a Scottish defensive wall around a tower house. My friend Sam, who is very Scottish, tells me his ancestors built these to keep my ancestors out. I'm choosing to read that as a compliment about our taste in architecture, our shared desire to try deep-fried battered Mars bars, and our mutual appreciation of Buckfast.
@@ -21,7 +23,7 @@ go build -o barmkin .
 sudo ./install.sh
 ```
 
-This puts the binary in `~/.local/bin/`, the config in `/etc/barmkin/rules.yaml`, and registers hooks for both Claude Code and opencode.
+This puts the binary in `~/.local/bin/`, the config in `/etc/barmkin/rules.yaml`, and registers hooks for Claude Code, opencode, and GitHub Copilot CLI. Pass `claude`, `opencode`, or `copilot-cli` to install for one harness only.
 
 ### Claude Code
 
@@ -30,6 +32,10 @@ A PreToolUse hook in `~/.claude/settings.json` runs `barmkin eval` on every `Bas
 ### opencode
 
 The plugin at `plugins/barmkin.ts` spawns `barmkin eval` on every `tool.execute.before` event. Installed to `~/.config/opencode/plugins/`.
+
+### GitHub Copilot CLI
+
+A preToolUse hook in `/etc/github-copilot/policy.d/barmkin.json` runs `/usr/local/bin/barmkin eval`. Barmkin always answers with explicit `permissionDecision` JSON. The registration schema has not yet been verified against a real Copilot CLI install; see [demo/README.md](demo/README.md).
 
 ## Commands
 
@@ -43,7 +49,7 @@ barmkin version
 
 ## Rules
 
-45 rules across 9 categories. Every rule has an `example` field that `go test` verifies automatically. Adding a rule with an example adds a test.
+49 rules across 10 categories. Every rule has an `example` field that `go test` verifies automatically. Adding a rule with an example adds a test.
 
 | Category | Rules |
 |----------|-------|
@@ -53,6 +59,7 @@ barmkin version
 | Exfiltration | curl\|bash, wget\|bash, scp ssh keys, curl upload, tar\|ssh, nc pipe, rsync remote |
 | Supply chain | npm git+ install, pip untrusted URL |
 | Obfuscation | base64+exec, eval hex |
+| Sensitive paths | Write/Edit targets: SSH keys, authorized_keys, .env, credentials files |
 | Secrets | AWS keys, private keys, GitHub/Slack/GitLab tokens, .env files |
 | Persistence | authorized_keys, chown system, ssh tunnel, history clear |
 | Container | docker prune --all, docker rm all, kubectl delete namespace |
