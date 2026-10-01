@@ -296,6 +296,64 @@ func TestEngine_EvaluateSearchTools_PatternNotScanned(t *testing.T) {
 	}
 }
 
+func TestEngine_EvaluateReadOnlyQueries_NotScanned(t *testing.T) {
+	e := newEngine(&Config{Rules: mustRules(t,
+		[2]string{"rm-rf-force", `rm\s+-rf\b`},
+		[2]string{"drop-table", `(?i)DROP\s+TABLE`},
+	)})
+	cases := []map[string]any{
+		{"tool_name": "WebSearch", "tool_input": map[string]any{"query": "DROP TABLE syntax"}},
+		{"tool_name": "WebSearch", "tool_input": map[string]any{"query": "how does rm -rf work"}},
+		{"tool": "grep", "action": "ContentSearch", "args": map[string]any{"pattern": "rm -rf"}},
+		{"tool": "websearch", "action": "WebSearch", "args": map[string]any{"query": "DROP TABLE syntax"}},
+	}
+	for _, in := range cases {
+		input, _ := json.Marshal(in)
+		if r := e.evaluate(input); r.Decision != "allow" {
+			t.Errorf("%v: got %+v, want allow", in, r)
+		}
+	}
+	input, _ := json.Marshal(map[string]any{"tool_name": "mcp__db__execute", "tool_input": map[string]any{"query": "DROP TABLE users"}})
+	if r := e.evaluate(input); r.Decision != "deny" {
+		t.Errorf("non-search tool query: got %+v, want deny", r)
+	}
+}
+
+func TestEngine_EvaluatePathRules_OnlyMatchPaths(t *testing.T) {
+	rules := mustRules(t,
+		[2]string{"private-key-block", `-----BEGIN\s+(RSA|EC|OPENSSH|PRIVATE)\s+(PRIVATE\s+)?KEY-----`},
+		[2]string{"dotenv-path", `^[^\s]*\.env$`},
+		[2]string{"ssh-private-key-path", `^[^\s]*\.ssh/(id_rsa|id_dsa|id_ecdsa|id_ed25519)(\.pub)?$`},
+		[2]string{"credentials-file-path", `^[^\s]*(\.aws/credentials|\.netrc|\.git-credentials|\.npmrc)$`},
+	)
+	for i := range rules[1:] {
+		rules[i+1].Target = "path"
+	}
+	e := newEngine(&Config{Rules: rules})
+	cases := []struct {
+		name  string
+		input map[string]any
+		want  string
+	}{
+		{"Edit new_string app.env", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/repo/docker-compose.yml", "old_string": "app.yaml", "new_string": "app.env"}}, ""},
+		{"Edit README .env", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/repo/README.md", "old_string": ".env.example", "new_string": ".env"}}, ""},
+		{"Write content npmrc", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/x.txt", "content": "~/.npmrc"}}, ""},
+		{"copilot edit new_str .env", map[string]any{"toolName": "edit", "toolArgs": `{"path":"/repo/a.yml","old_str":"a","new_str":"prod.env"}`}, ""},
+		{"Write ssh key path", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/home/user/.ssh/id_rsa", "content": "x"}}, "ssh-private-key-path"},
+		{"Edit .env path", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/repo/.env", "old_string": "a", "new_string": "b"}}, "dotenv-path"},
+		{"NotebookEdit path", map[string]any{"tool_name": "NotebookEdit", "tool_input": map[string]any{"notebook_path": "/home/user/.aws/credentials", "new_source": "x"}}, "credentials-file-path"},
+		{"Write private key content", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/k.pem", "content": "-----BEGIN RSA PRIVATE KEY-----\nMIIE"}}, "private-key-block"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, _ := json.Marshal(tc.input)
+			if r := e.evaluate(input); r.Rule != tc.want {
+				t.Errorf("got %+v, want rule %q", r, tc.want)
+			}
+		})
+	}
+}
+
 func TestEngine_EvaluateCopilotCLI_StringEncodedToolArgsDeny(t *testing.T) {
 	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
 	input, _ := json.Marshal(map[string]any{

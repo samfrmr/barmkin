@@ -47,9 +47,18 @@ func (e *Engine) evaluate(input []byte) HookOutput {
 	req.normalize()
 	content := req.extractContent()
 	var matched *Rule
-	for _, target := range req.scanTargets() {
+	paths, payloads := req.scanTargets()
+	for _, target := range paths {
 		if matched = match(target, e.cfg.Rules); matched != nil {
 			break
+		}
+	}
+	if matched == nil && len(payloads) > 0 {
+		rules := payloadRules(e.cfg.Rules)
+		for _, target := range payloads {
+			if matched = match(target, rules); matched != nil {
+				break
+			}
 		}
 	}
 

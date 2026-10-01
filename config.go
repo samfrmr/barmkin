@@ -37,6 +37,7 @@ type Rule struct {
 	Action  string `yaml:"action"`  // "deny" (default) or "allow" (overrides all denies)
 	Reason  string `yaml:"reason"`  // shown to the LLM when denied
 	Example string `yaml:"example"` // test string - verified by `go test` and `barmkin validate`
+	Target  string `yaml:"target"`  // "" (all scan targets) or "path" (file-tool path fields only, never payloads)
 	regex   *regexp.Regexp
 }
 
@@ -192,6 +193,9 @@ func (r *Rule) compile() error {
 		return err
 	}
 	r.regex = re
+	if r.Target != "" && r.Target != "path" {
+		return fmt.Errorf("unknown target %q (want \"path\" or empty)", r.Target)
+	}
 	if r.Action == "" {
 		r.Action = "deny"
 	}

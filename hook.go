@@ -69,6 +69,7 @@ var toolActions = map[string]string{
 	"bash": "ShellCommand", "write": "FileWrite", "edit": "FileEdit",
 	"multiedit": "FileEdit", "notebookedit": "FileEdit",
 	"read": "FileRead", "glob": "FileSearch", "grep": "ContentSearch",
+	"websearch": "WebSearch",
 }
 
 // normalize maps Claude Code and Copilot CLI fields into AdapterRequest
@@ -109,10 +110,12 @@ func (r *Request) normalize() {
 
 // extractContent pulls the scannable text from the request.
 // Tries AdapterRequest args first (normalized), then falls back to
-// Claude Code's raw tool_input format.
+// Claude Code's raw tool_input format. A read-only search tool's
+// query or pattern is data being searched for, never a scan target,
+// so for those tools only a path-like field is returned.
 func (r *Request) extractContent() string {
 	// AdapterRequest: check args for known field names
-	if s := firstNonEmpty(r.Args, "command", "path", "url", "content", "query", "pattern", "patch_text"); s != "" {
+	if s := firstNonEmpty(r.Args, "command", "path", "url", "content", "patch_text"); s != "" {
 		return s
 	}
 	// Claude Code: top-level command field
@@ -129,22 +132,25 @@ func (r *Request) extractContent() string {
 	if s := firstString(r.ToolArgsCamel, "command", "path", "filePath", "file_path", "url", "content"); s != "" {
 		return s
 	}
+	if r.readOnly() {
+		return ""
+	}
+	if s := firstNonEmpty(r.Args, "query", "pattern"); s != "" {
+		return s
+	}
 	// Fallback: serialize remaining args
 	if len(r.Args) > 0 {
 		b, _ := json.Marshal(r.Args)
 		return string(b)
 	}
-	if readOnlyActions[r.Action] {
-		return ""
-	}
 	return strings.TrimSpace(string(r.ToolInput))
 }
 
-// readOnlyActions are the toolActions whose remaining tool_input
-// (e.g. a Grep/Glob search pattern) is data being searched for, never
-// a scan target.
-var readOnlyActions = map[string]bool{
-	"FileRead": true, "FileSearch": true, "ContentSearch": true,
+// readOnly reports whether the request's action only reads or
+// searches (FileRead, FileSearch, ContentSearch, WebSearch, and any
+// future *Search action), so its remaining input is never scanned.
+func (r *Request) readOnly() bool {
+	return r.Action == "FileRead" || strings.HasSuffix(r.Action, "Search")
 }
 
 // fileMutatingTools are the (lowercased) Claude Code and Copilot CLI
@@ -156,25 +162,27 @@ var fileMutatingTools = map[string]bool{
 	"create": true,
 }
 
-// fileToolFields are the tool_input/toolArgs keys whose values are
-// each scanned on their own, so a file-mutating tool is checked on
-// both its target path and its payload.
-var fileToolFields = []string{
-	"path", "filePath", "file_path", "notebook_path", "content",
-	"old_string", "new_string", "new_source", "file_text", "old_str",
-	"new_str",
-}
+// filePathFields and filePayloadFields are the tool_input/toolArgs
+// keys whose values are each scanned on their own, so a file-mutating
+// tool is checked on both its target path and its payload.
+var (
+	filePathFields    = []string{"path", "filePath", "file_path", "notebook_path"}
+	filePayloadFields = []string{
+		"content", "old_string", "new_string", "new_source", "file_text",
+		"old_str", "new_str",
+	}
+)
 
-// scanTargets returns every string the regex rules are matched
-// against: the primary extractContent value plus, for file-mutating
-// tools, each present fileToolFields value from Claude Code's
-// tool_input, Copilot CLI's toolArgs, and MultiEdit's edits. Path
-// rules anchored with ^...$ still see the bare path, while content
-// rules also see the written payload.
-func (r *Request) scanTargets() []string {
-	targets := []string{r.extractContent()}
+// scanTargets returns the strings the regex rules are matched
+// against. paths holds the primary extractContent value plus, for
+// file-mutating tools, each filePathFields value; every rule applies
+// to these. payloads holds each filePayloadFields value from Claude
+// Code's tool_input, Copilot CLI's toolArgs, and MultiEdit's edits;
+// path-only rules (target: path) never apply to these.
+func (r *Request) scanTargets() (paths, payloads []string) {
+	paths = []string{r.extractContent()}
 	if !fileMutatingTools[r.Tool] {
-		return targets
+		return paths, nil
 	}
 	for _, raw := range []json.RawMessage{r.ToolInput, r.ToolArgsCamel} {
 		m := decodeObject(raw)
@@ -187,14 +195,33 @@ func (r *Request) scanTargets() []string {
 			}
 		}
 		for _, o := range objs {
-			for _, k := range fileToolFields {
-				if s, ok := o[k].(string); ok && s != "" {
-					targets = append(targets, s)
-				}
-			}
+			paths = appendStrings(paths, o, filePathFields)
+			payloads = appendStrings(payloads, o, filePayloadFields)
 		}
 	}
-	return targets
+	return paths, payloads
+}
+
+// appendStrings appends the non-empty string value of each key in m.
+func appendStrings(out []string, m map[string]any, keys []string) []string {
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// payloadRules returns the rules that apply to payload targets: every
+// rule except the path-only (target: path) ones.
+func payloadRules(rules []Rule) []Rule {
+	var out []Rule
+	for _, r := range rules {
+		if r.Target != "path" {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // firstNonEmpty returns the first non-empty string value for any of
