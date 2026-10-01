@@ -124,7 +124,7 @@ JSON
     sudo mkdir -p "$policy_dir"
     sudo cp "$BINARY" "$sys_bin"
     sudo chmod +x "$sys_bin"
-    sudo install -m 0644 -o root -g root "$tmp" "$policy_file"
+    sudo install -m 0644 -o 0 -g 0 "$tmp" "$policy_file"
   fi
   rm -f "$tmp"
   local perms; perms=$(stat -c '%a %U' "$policy_file" 2>/dev/null || stat -f '%Lp %Su' "$policy_file")
