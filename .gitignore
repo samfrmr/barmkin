@@ -1,2 +1,4 @@
 barmkin
 *.log
+demo/out/
+demo/jev.key

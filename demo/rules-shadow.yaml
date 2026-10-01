@@ -1,0 +1,40 @@
+# Dynamic-hooks demo: Phase 2, shadow mode.
+#
+# Shadow mode calls Jev, logs the outcome it WOULD act on, and always
+# passes - this is how a dynamic layer gets calibrated before anyone
+# trusts it to block anything. See demo/README.md.
+
+rules:
+  - name: "rm-rf-force"
+    pattern: 'rm\s+-rf\b'
+    reason: "Recursive force-delete"
+    example: "rm -rf /tmp/foo"
+
+  - name: "test-deny"
+    pattern: 'BARMKIN-TEST-DENY'
+    reason: "Test vector (expected deny)"
+    example: "touch BARMKIN-TEST-DENY"
+
+log:
+  path: "./demo/out/shadow.log"
+
+dynamic:
+  enabled: true
+  mode: shadow
+  provider:
+    base_url: "https://openrouter.ai/api"   # direct egress, no corporate proxy/gateway (demo scope)
+    model: "jev-1.13"                       # pinned, per D1
+    auth:
+      type: bearer_file
+      path: "./demo/jev.key"                # must be 0600; see demo/README.md
+    timeout_ms: 1500
+  gate:
+    tools: ["bash"]
+    permission_modes: ["auto", "bypassPermissions", "dontAsk"]
+    skip_read_only: true
+    skip_allow_rules: true
+  on_unavailable: pass    # shadow default (D4, Phase 2)
+  breaker:
+    enabled: true
+    open_after_failures: 1
+    cooldown_s: 60

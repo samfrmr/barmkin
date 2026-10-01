@@ -1,0 +1,45 @@
+# Dynamic-hooks demo: Phase 3, enforce mode.
+#
+# Enforce mode acts on the composition: a clear hazard rejection
+# denies, a clear soft rejection escalates (Claude Code "ask", forcing
+# a human prompt even in auto mode). When Jev is unreachable it fails
+# closed-to-manual (escalate), with a per-session breaker that opens
+# after one failure and then short-circuits - no network wait - until
+# its cooldown elapses. See demo/README.md.
+
+rules:
+  - name: "rm-rf-force"
+    pattern: 'rm\s+-rf\b'
+    reason: "Recursive force-delete"
+    example: "rm -rf /tmp/foo"
+
+  - name: "test-deny"
+    pattern: 'BARMKIN-TEST-DENY'
+    reason: "Test vector (expected deny)"
+    example: "touch BARMKIN-TEST-DENY"
+
+log:
+  path: "./demo/out/enforce.log"
+
+dynamic:
+  enabled: true
+  mode: enforce
+  provider:
+    base_url: "https://openrouter.ai/api"
+    model: "jev-1.13"
+    auth:
+      type: bearer_file
+      path: "./demo/jev.key"
+    timeout_ms: 1500
+  gate:
+    tools: ["bash"]
+    permission_modes: ["auto", "bypassPermissions", "dontAsk"]
+    skip_read_only: true
+    skip_allow_rules: true
+  on_unavailable: escalate       # fail-closed-to-manual (D4)
+  on_unavailable_by_mode:
+    bypassPermissions: deny      # until a human verifies hook "ask" is honoured there (report.md §5c)
+  breaker:
+    enabled: true
+    open_after_failures: 1
+    cooldown_s: 60
