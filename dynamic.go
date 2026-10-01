@@ -219,8 +219,12 @@ func runDynamic(cfg Dynamic, req Request, content string) *dynamicResult {
 		res.ErrorKind = errKind(jerr)
 		res.FailMode = "on_unavailable"
 		outcome := onUnavailableOutcome(cfg, req.PermissionMode)
-		res.Outcome = outcome
 		res.WouldDecision = outcome
+		if cfg.Mode == "enforce" {
+			res.Outcome = outcome
+		} else {
+			res.Outcome = Pass
+		}
 		if !open {
 			updateBreakerOnFailure(cfg.Breaker, sessionID, st)
 		}

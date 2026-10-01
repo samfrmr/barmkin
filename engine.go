@@ -46,7 +46,12 @@ func (e *Engine) evaluate(input []byte) HookOutput {
 
 	req.normalize()
 	content := req.extractContent()
-	matched := match(content, e.cfg.Rules)
+	var matched *Rule
+	for _, target := range req.scanTargets() {
+		if matched = match(target, e.cfg.Rules); matched != nil {
+			break
+		}
+	}
 
 	var result HookOutput
 	var dyn *dynamicResult

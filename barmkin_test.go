@@ -234,6 +234,34 @@ func TestEngine_EvaluateCopilotCLI_Deny(t *testing.T) {
 	}
 }
 
+func TestEngine_EvaluateFileTools_ScanPathAndPayload(t *testing.T) {
+	e := newEngine(&Config{Rules: mustRules(t,
+		[2]string{"private-key-block", `-----BEGIN\s+(RSA|EC|OPENSSH|PRIVATE)\s+(PRIVATE\s+)?KEY-----`},
+		[2]string{"github-token", `\bgh[pousr]_[A-Za-z0-9]{36}\b`},
+		[2]string{"ssh-private-key-path", `^[^\s]*\.ssh/(id_rsa|id_dsa|id_ecdsa|id_ed25519)(\.pub)?$`},
+	)})
+	cases := []struct {
+		name  string
+		input map[string]any
+		want  string
+	}{
+		{"claude Write content", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/k.pem", "content": "-----BEGIN RSA PRIVATE KEY-----\nMIIE"}}, "private-key-block"},
+		{"claude Edit new_string", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/tmp/x", "old_string": "a", "new_string": "token=ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII"}}, "github-token"},
+		{"claude Write sensitive path", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/home/u/.ssh/id_rsa", "content": "harmless"}}, "ssh-private-key-path"},
+		{"copilot edit new_str", map[string]any{"toolName": "edit", "toolArgs": `{"path":"/tmp/x","old_str":"a","new_str":"-----BEGIN OPENSSH PRIVATE KEY-----"}`}, "private-key-block"},
+		{"claude Write benign", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/notes.md", "content": "hello"}}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, _ := json.Marshal(tc.input)
+			r := e.evaluate(input)
+			if r.Rule != tc.want {
+				t.Errorf("got %+v, want rule %q", r, tc.want)
+			}
+		})
+	}
+}
+
 func TestEngine_EvaluateCopilotCLI_StringEncodedToolArgsDeny(t *testing.T) {
 	e := newEngine(&Config{Rules: mustRules(t, [2]string{"rm-rf", `rm\s+-rf\b`})})
 	input, _ := json.Marshal(map[string]any{

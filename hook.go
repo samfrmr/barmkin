@@ -137,6 +137,33 @@ func (r *Request) extractContent() string {
 	return strings.TrimSpace(string(r.ToolInput))
 }
 
+// fileToolFields are the tool_input/toolArgs keys whose values are
+// each scanned on their own, so a Write/Edit is checked on both its
+// target path and its payload.
+var fileToolFields = []string{
+	"command", "path", "filePath", "file_path", "url", "content",
+	"old_string", "new_string", "file_text", "old_str", "new_str",
+	"pattern", "patch_text",
+}
+
+// scanTargets returns every string the regex rules are matched
+// against: the primary extractContent value plus each present
+// fileToolFields value from Claude Code's tool_input and Copilot
+// CLI's toolArgs. Path rules anchored with ^...$ still see the bare
+// path, while content rules also see the written payload.
+func (r *Request) scanTargets() []string {
+	targets := []string{r.extractContent()}
+	for _, raw := range []json.RawMessage{r.ToolInput, r.ToolArgsCamel} {
+		m := decodeObject(raw)
+		for _, k := range fileToolFields {
+			if s, ok := m[k].(string); ok && s != "" {
+				targets = append(targets, s)
+			}
+		}
+	}
+	return targets
+}
+
 // firstNonEmpty returns the first non-empty string value for any of
 // the given keys in the map.
 func firstNonEmpty(m map[string]any, keys ...string) string {
@@ -153,8 +180,14 @@ func firstNonEmpty(m map[string]any, keys ...string) string {
 // string holding an encoded object (Copilot CLI's toolArgs) is
 // decoded first.
 func firstString(raw json.RawMessage, keys ...string) string {
+	return firstNonEmpty(decodeObject(raw), keys...)
+}
+
+// decodeObject unmarshals a JSON object, or a JSON string holding an
+// encoded object, into a map. Anything else yields nil.
+func decodeObject(raw json.RawMessage) map[string]any {
 	if len(raw) == 0 {
-		return ""
+		return nil
 	}
 	var encoded string
 	if json.Unmarshal(raw, &encoded) == nil {
@@ -162,9 +195,9 @@ func firstString(raw json.RawMessage, keys ...string) string {
 	}
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {
-		return ""
+		return nil
 	}
-	return firstNonEmpty(m, keys...)
+	return m
 }
 
 // match checks rules in order. An allow rule that matches overrides

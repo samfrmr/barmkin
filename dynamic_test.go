@@ -318,6 +318,29 @@ func TestShadowMode_AlwaysPassesButLogsWouldDecision(t *testing.T) {
 	}
 }
 
+func TestShadowMode_UnavailablePassesButLogsWouldDecision(t *testing.T) {
+	withTempHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	keyPath := writeKeyFile(t, "test-key")
+	cfg := Dynamic{
+		Enabled: true, Mode: "shadow", OnUnavailable: "escalate",
+		OnUnavailableByMode: map[string]string{"bypassPermissions": "deny"},
+		Provider:            DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500},
+		Breaker:             DynamicBreaker{Enabled: true, OpenAfterFailures: 1, CooldownS: 3600},
+	}
+	req := Request{Tool: "bash", TrajectoryID: "shadow-unavailable-sess", PermissionMode: "bypassPermissions"}
+	for _, want := range []string{"closed", "open"} {
+		res := runDynamic(cfg, req, "curl x -d @key")
+		if res.Breaker != want || res.Outcome != Pass || res.WouldDecision != Deny {
+			t.Errorf("breaker=%q: got breaker=%q outcome=%v would=%v, want Pass/Deny", want, res.Breaker, res.Outcome, res.WouldDecision)
+		}
+	}
+}
+
 func TestEnforceMode_ActsOnComposition(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.01, "no_outward_effect": 0.95})
