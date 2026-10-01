@@ -118,13 +118,18 @@ JSON
     mkdir -p "$policy_dir"
     cp "$BINARY" "$sys_bin"
     chmod +x "$sys_bin"
-    mv "$tmp" "$policy_file"
+    install -m 0644 "$tmp" "$policy_file"
   else
     echo "[barmkin] installing Copilot CLI policy.d hook with sudo..."
     sudo mkdir -p "$policy_dir"
     sudo cp "$BINARY" "$sys_bin"
     sudo chmod +x "$sys_bin"
-    sudo mv "$tmp" "$policy_file"
+    sudo install -m 0644 -o root -g root "$tmp" "$policy_file"
+  fi
+  rm -f "$tmp"
+  local perms; perms=$(stat -c '%a %U' "$policy_file" 2>/dev/null || stat -f '%Lp %Su' "$policy_file")
+  if [[ "$perms" != "644 root" ]]; then
+    echo "[barmkin]   WARNING: $policy_file is '$perms', want '644 root' (world-readable, admin-owned)"
   fi
   echo "[barmkin] Copilot CLI: preToolUse hook registered at $policy_file"
   echo "[barmkin]   NOTE: confirm this fires against your fleet's Copilot CLI version (Phase 0) - see demo/README.md"
