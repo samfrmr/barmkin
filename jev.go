@@ -47,9 +47,12 @@ const maxJevResponseBytes = 256 * 1024
 
 // jevQuestion is one System One question. The POC only uses "noul"
 // (probability-of-yes) questions - never mix Noul and Choice
-// thresholds in one composition.
+// thresholds in one composition. TypeSafe's wire format requires both
+// type and instructions on every question; instructions may be a
+// string, object, or array (criteria is optional).
 type jevQuestion struct {
-	Type string `json:"type"`
+	Type         string `json:"type"`
+	Instructions string `json:"instructions"`
 }
 
 type systemOneRequest struct {

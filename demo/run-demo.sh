@@ -72,7 +72,23 @@ hr "9. validate"
 "$BIN" -config demo/rules-enforce.yaml validate | tail -5
 
 hr "done"
-cat <<'EOF'
+
+# Portable 0600-and-non-empty check (GNU stat on Linux, BSD stat on macOS).
+key_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+if [ -s demo/jev.key ] && [ "$(key_mode demo/jev.key)" = "600" ]; then
+  cat <<'EOF'
+A live Jev key was configured for this run (demo/jev.key, 0600), so
+the gated calls above were real round trips to the configured
+provider, not just the on_unavailable fail-closed path. Check the
+"dynamic" block in the audit log above - request_id, latency_ms, and
+the actual probabilities - to see it; everywhere this script hit a
+regex deny or a read-only skip, Jev still wasn't called (by design).
+EOF
+else
+  cat <<'EOF'
 This run had no Jev key configured, so every gated call took the
 on_unavailable path - which is exactly what "the breaker opening when
 the key is pulled" looks like. To also see a real Jev round trip and
@@ -89,3 +105,4 @@ original scout report hit probing bypassPermissions. Direct egress
 was not otherwise exercised here; run step 1-3 outside this harness,
 or point base_url at an internal gateway, to validate it for real.
 EOF
+fi

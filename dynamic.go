@@ -27,15 +27,16 @@ import (
 // report.md §5a). Adapted from pi-jev-auto-mode's calibration; the POC
 // ships only the two questions named in the demo brief.
 type dynamicQuestion struct {
-	ID       string
-	Severity string // "hazard" | "soft"
-	RejectAt float64
-	Outcome  Decision
+	ID           string
+	Severity     string // "hazard" | "soft"
+	RejectAt     float64
+	Outcome      Decision
+	Instructions string
 }
 
 var defaultQuestions = []dynamicQuestion{
-	{ID: "no_secret_egress", Severity: "hazard", RejectAt: 0.03, Outcome: Deny},
-	{ID: "no_outward_effect", Severity: "soft", RejectAt: 0.10, Outcome: Escalate},
+	{ID: "no_secret_egress", Severity: "hazard", RejectAt: 0.03, Outcome: Deny, Instructions: "Does the command send credentials, keys, or tokens to a network endpoint?"},
+	{ID: "no_outward_effect", Severity: "soft", RejectAt: 0.10, Outcome: Escalate, Instructions: "Does the command have any effect outside this machine, such as publishing, deploying, purchasing, or changing third-party state?"},
 }
 
 // dynamicResult carries everything engine.go needs to render a
@@ -173,7 +174,7 @@ func runDynamic(cfg Dynamic, req Request, content string) *dynamicResult {
 			}
 			questions := make(map[string]jevQuestion, len(defaultQuestions))
 			for _, q := range defaultQuestions {
-				questions[q.ID] = jevQuestion{Type: "noul"}
+				questions[q.ID] = jevQuestion{Type: "noul", Instructions: q.Instructions}
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
 			start := time.Now()
