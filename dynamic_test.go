@@ -554,7 +554,7 @@ func TestSaveBreakerStateAtomic_ConcurrentWritesNeverCorrupt(t *testing.T) {
 // ── Jev client: transport failure matrix ───────────────────────────────
 
 func TestJevClient_NoKey(t *testing.T) {
-	_, err := newJevClient(DynamicProvider{BaseURL: "http://unused", Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: "/nonexistent"}})
+	_, err := newJevClient(context.Background(), DynamicProvider{BaseURL: "http://unused", Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: "/nonexistent"}})
 	if errKind(err) != "no_key" {
 		t.Errorf("got %v, want no_key", err)
 	}
@@ -565,7 +565,7 @@ func TestJevClient_KeyFileWrongPermissions(t *testing.T) {
 	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := newJevClient(DynamicProvider{BaseURL: "http://unused", Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: path}})
+	_, err := newJevClient(context.Background(), DynamicProvider{BaseURL: "http://unused", Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: path}})
 	if errKind(err) != "no_key" {
 		t.Errorf("0644 key file should be rejected as no_key, got %v", err)
 	}
@@ -574,7 +574,7 @@ func TestJevClient_KeyFileWrongPermissions(t *testing.T) {
 // ── auth.type: command / none (Tier A credential model) ───────────────────
 
 func TestResolveJevKey_Command(t *testing.T) {
-	key, err := resolveJevKey(DynamicAuth{Type: "command", Command: []string{"printf", "corp-token-abc"}}, time.Second)
+	key, err := resolveJevKey(context.Background(), DynamicAuth{Type: "command", Command: []string{"printf", "corp-token-abc"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,14 +584,14 @@ func TestResolveJevKey_Command(t *testing.T) {
 }
 
 func TestResolveJevKey_CommandFailureIsNoKey(t *testing.T) {
-	_, err := resolveJevKey(DynamicAuth{Type: "command", Command: []string{"/nonexistent/corp-token-broker"}}, time.Second)
+	_, err := resolveJevKey(context.Background(), DynamicAuth{Type: "command", Command: []string{"/nonexistent/corp-token-broker"}})
 	if errKind(err) != "no_key" {
 		t.Errorf("got %v, want no_key", err)
 	}
 }
 
 func TestResolveJevKey_CommandEmptyOutputIsNoKey(t *testing.T) {
-	_, err := resolveJevKey(DynamicAuth{Type: "command", Command: []string{"printf", ""}}, time.Second)
+	_, err := resolveJevKey(context.Background(), DynamicAuth{Type: "command", Command: []string{"printf", ""}})
 	if errKind(err) != "no_key" {
 		t.Errorf("got %v, want no_key", err)
 	}
@@ -599,7 +599,9 @@ func TestResolveJevKey_CommandEmptyOutputIsNoKey(t *testing.T) {
 
 func TestResolveJevKey_CommandHangingBrokerTimesOutAsNoKey(t *testing.T) {
 	start := time.Now()
-	_, err := resolveJevKey(DynamicAuth{Type: "command", Command: []string{"sh", "-c", "sleep 30"}}, 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err := resolveJevKey(ctx, DynamicAuth{Type: "command", Command: []string{"sh", "-c", "sleep 30"}})
 	if errKind(err) != "no_key" {
 		t.Errorf("got %v, want no_key", err)
 	}
@@ -609,7 +611,7 @@ func TestResolveJevKey_CommandHangingBrokerTimesOutAsNoKey(t *testing.T) {
 }
 
 func TestResolveJevKey_CommandUnset(t *testing.T) {
-	_, err := resolveJevKey(DynamicAuth{Type: "command"}, time.Second)
+	_, err := resolveJevKey(context.Background(), DynamicAuth{Type: "command"})
 	if errKind(err) != "no_key" {
 		t.Errorf("got %v, want no_key", err)
 	}
@@ -618,7 +620,7 @@ func TestResolveJevKey_CommandUnset(t *testing.T) {
 func TestResolveJevKey_NoneHasNoKeyAndNoError(t *testing.T) {
 	// "none": the gateway authenticates the caller (workload
 	// identity), so there is deliberately no credential to resolve.
-	key, err := resolveJevKey(DynamicAuth{Type: "none"}, time.Second)
+	key, err := resolveJevKey(context.Background(), DynamicAuth{Type: "none"})
 	if err != nil || key != "" {
 		t.Errorf("got key=%q err=%v, want empty key, no error", key, err)
 	}
@@ -725,7 +727,7 @@ func TestJevClient_Timeout(t *testing.T) {
 	defer srv.Close()
 
 	keyPath := writeKeyFile(t, "k")
-	client, err := newJevClient(DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 10})
+	client, err := newJevClient(context.Background(), DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -739,7 +741,7 @@ func TestJevClient_Timeout(t *testing.T) {
 
 func TestJevClient_RefusesSendingKeyInBody(t *testing.T) {
 	keyPath := writeKeyFile(t, "my-secret-key")
-	client, err := newJevClient(DynamicProvider{BaseURL: "http://unused", Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500})
+	client, err := newJevClient(context.Background(), DynamicProvider{BaseURL: "http://unused", Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +760,7 @@ func TestJevClient_ValidResponse(t *testing.T) {
 	defer srv.Close()
 
 	keyPath := writeKeyFile(t, "k")
-	client, err := newJevClient(DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500})
+	client, err := newJevClient(context.Background(), DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -794,7 +796,7 @@ func TestJevClient_RequestIncludesInstructionsPerQuestion(t *testing.T) {
 	// instructions text below, and trip the refused_send credential
 	// check this client correctly applies.
 	keyPath := writeKeyFile(t, "zz-test-token-93f1")
-	client, err := newJevClient(DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500})
+	client, err := newJevClient(context.Background(), DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 500})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -980,7 +982,7 @@ func writeSystemOneResponse(w http.ResponseWriter, probs map[string]float64) {
 func assertAskErrorKind(t *testing.T, baseURL, wantKind string) {
 	t.Helper()
 	keyPath := writeKeyFile(t, "k")
-	client, err := newJevClient(DynamicProvider{BaseURL: baseURL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 1000})
+	client, err := newJevClient(context.Background(), DynamicProvider{BaseURL: baseURL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -998,7 +1000,7 @@ func assertAskErrorKind(t *testing.T, baseURL, wantKind string) {
 func assertAskSucceeds(t *testing.T, baseURL string) {
 	t.Helper()
 	keyPath := writeKeyFile(t, "zz-test-token-93f1") // see note in TestJevClient_RequestIncludesInstructionsPerQuestion
-	client, err := newJevClient(DynamicProvider{BaseURL: baseURL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 1000})
+	client, err := newJevClient(context.Background(), DynamicProvider{BaseURL: baseURL, Model: "jev-1.13", Auth: DynamicAuth{Type: "bearer_file", Path: keyPath}, TimeoutMs: 1000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1010,5 +1012,102 @@ func assertAskSucceeds(t *testing.T, baseURL string) {
 	}
 	if _, _, _, err := client.ask(ctx, map[string]string{"command": "ls"}, questions); err != nil {
 		t.Errorf("ask() against a schema-enforcing stub failed: %v", err)
+	}
+}
+
+// ── Escalate rendering per agent ─────────────────────────────────────────
+
+func TestEvalOutput_EscalateIsAskOnlyForClaudeCode(t *testing.T) {
+	withTempHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.01})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Dynamic: Dynamic{
+			Enabled: true, Mode: "enforce", OnUnavailable: "escalate",
+			Provider: DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "none"}, TimeoutMs: 1000},
+			Gate:     DynamicGate{Tools: []string{"bash"}, PermissionModes: []string{"auto"}},
+		},
+	}
+	cfg.Dynamic.applyDefaults()
+
+	claude := `{"tool_name":"Bash","tool_input":{"command":"npm publish"},"session_id":"s-cc","permission_mode":"auto"}`
+	stdout, stderr, code := renderEvalOutput(newEngine(cfg).evaluate([]byte(claude)))
+	if code != 0 || stderr != "" || !strings.Contains(stdout, `"permissionDecision":"ask"`) {
+		t.Errorf("claude-code escalate: got stdout=%q stderr=%q code=%d, want ask JSON with exit 0", stdout, stderr, code)
+	}
+
+	opencode := `{"trajectory_id":"s-oc","tool":"bash","action":"ShellCommand","args":{"command":"npm publish"}}`
+	stdout, stderr, code = renderEvalOutput(newEngine(cfg).evaluate([]byte(opencode)))
+	if code != 2 || stdout != "" || !strings.Contains(stderr, "no_outward_effect") {
+		t.Errorf("opencode escalate: got stdout=%q stderr=%q code=%d, want deny (exit 2, reason on stderr)", stdout, stderr, code)
+	}
+}
+
+// ── refused_send is content hygiene, not unavailability ──────────────────
+
+func TestBreaker_RefusedSendDoesNotOpenBreaker(t *testing.T) {
+	withTempHome(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95})
+	}))
+	defer srv.Close()
+
+	cfg := Dynamic{
+		Enabled: true, Mode: "enforce", OnUnavailable: "escalate",
+		Provider: DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "none"}, TimeoutMs: 1000},
+		Breaker:  DynamicBreaker{Enabled: true, OpenAfterFailures: 1, CooldownS: 3600},
+	}
+	req := Request{Tool: "bash", TrajectoryID: "refused-sess"}
+
+	res1 := runDynamic(cfg, req, "python check_pem.py --marker 'PRIVATE KEY'")
+	if res1.ErrorKind != "refused_send" || res1.Outcome != Escalate {
+		t.Fatalf("first call: got error=%q outcome=%v, want refused_send/Escalate", res1.ErrorKind, res1.Outcome)
+	}
+
+	res2 := runDynamic(cfg, req, "npm test")
+	if res2.Breaker != "closed" || res2.ErrorKind != "" || res2.Outcome != Pass {
+		t.Errorf("second call: got breaker=%s error=%q outcome=%v, want closed/no error/Pass", res2.Breaker, res2.ErrorKind, res2.Outcome)
+	}
+	if calls != 1 {
+		t.Errorf("second call must reach Jev, got %d calls", calls)
+	}
+}
+
+// ── timeout_ms bounds the whole stage ────────────────────────────────────
+
+func TestRunDynamic_TimeoutCoversAuthCommandAndHTTP(t *testing.T) {
+	withTempHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(800 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95})
+	}))
+	defer srv.Close()
+
+	cfg := Dynamic{
+		Enabled: true, Mode: "enforce", OnUnavailable: "escalate",
+		Provider: DynamicProvider{
+			BaseURL: srv.URL, Model: "jev-1.13", TimeoutMs: 1000,
+			Auth: DynamicAuth{Type: "command", Command: []string{"sh", "-c", "sleep 0.6; printf corp-token"}},
+		},
+	}
+
+	start := time.Now()
+	res := runDynamic(cfg, Request{Tool: "bash", TrajectoryID: "deadline-sess"}, "npm test")
+	elapsed := time.Since(start)
+
+	if res.ErrorKind != "timeout" {
+		t.Errorf("slow broker + slow HTTP must exceed one shared timeout_ms, got error=%q outcome=%v", res.ErrorKind, res.Outcome)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("dynamic stage took %v, want roughly one timeout_ms (1s), not two", elapsed)
 	}
 }

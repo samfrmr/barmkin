@@ -43,6 +43,7 @@ type HookOutput struct {
 	Decision string `json:"decision"`         // "allow" or "deny"
 	Reason   string `json:"reason,omitempty"` // human-readable, shown to LLM on deny
 	Rule     string `json:"rule,omitempty"`   // rule name that matched
+	Agent    string `json:"-"`                // normalized agent_id; only Claude Code can render escalate as ask
 }
 
 // toolActions maps Claude Code tool names to semantic action names

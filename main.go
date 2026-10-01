@@ -127,19 +127,35 @@ func cmdEval(configPath string) {
 	defer engine.close()
 	result := engine.evaluate(data)
 
-	switch result.Decision {
-	case "deny":
+	stdout, stderr, code := renderEvalOutput(result)
+	if stdout != "" {
+		fmt.Println(stdout)
+	}
+	if stderr != "" {
+		fmt.Fprintln(os.Stderr, stderr)
+	}
+	if code != 0 {
+		os.Exit(code)
+	}
+}
+
+// renderEvalOutput maps a HookOutput to the hook's stdout, stderr and
+// exit code. Escalate forces a Claude Code permission prompt even in
+// auto mode (>= v2.1.211) via ask JSON with exit 0. Any other agent
+// (e.g. the opencode plugin, which treats every exit 0 as allow) has
+// no way to express an ask, so escalate is rendered as a deny there.
+func renderEvalOutput(result HookOutput) (stdout, stderr string, code int) {
+	switch {
+	case result.Decision == "escalate" && result.Agent == "claude-code":
+		return renderEscalateJSON(result.Reason), "", 0
+	case result.Decision == "deny", result.Decision == "escalate":
 		msg := result.Reason
 		if msg == "" {
 			msg = fmt.Sprintf("blocked by rule: %s", result.Rule)
 		}
-		fmt.Fprintf(os.Stderr, "[barmkin] %s\n", msg)
-		os.Exit(2)
-	case "escalate":
-		// Forces a Claude Code permission prompt even in auto mode
-		// (>= v2.1.211). Exit 0: this is not a deny.
-		fmt.Println(renderEscalateJSON(result.Reason))
+		return "", "[barmkin] " + msg, 2
 	}
+	return "", "", 0
 }
 
 // cmdValidate loads the config and reports:

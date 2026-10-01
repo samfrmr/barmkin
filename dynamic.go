@@ -183,7 +183,9 @@ func runDynamic(cfg Dynamic, req Request, content string) *dynamicResult {
 		} else {
 			res.Breaker = "closed"
 		}
-		client, cerr := newJevClient(cfg.Provider)
+		ctx, cancel := context.WithTimeout(context.Background(), providerTimeout(cfg.Provider))
+		defer cancel()
+		client, cerr := newJevClient(ctx, cfg.Provider)
 		if cerr != nil {
 			jerr = cerr
 		} else {
@@ -203,11 +205,9 @@ func runDynamic(cfg Dynamic, req Request, content string) *dynamicResult {
 			for _, q := range defaultQuestions {
 				questions[q.ID] = jevQuestion{Type: "noul", Instructions: q.Instructions}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), client.timeout)
 			start := time.Now()
 			probs, modelID, reqID, jerr = client.ask(ctx, state, questions)
 			latency = time.Since(start)
-			cancel()
 		}
 	}
 
@@ -225,7 +225,7 @@ func runDynamic(cfg Dynamic, req Request, content string) *dynamicResult {
 		} else {
 			res.Outcome = Pass
 		}
-		if !open {
+		if !open && res.ErrorKind != "refused_send" {
 			updateBreakerOnFailure(cfg.Breaker, sessionID, st)
 		}
 		return res

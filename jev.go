@@ -116,18 +116,23 @@ type jevClient struct {
 	timeout time.Duration
 }
 
-// newJevClient builds a client from Provider config, resolving the
-// bearer credential. Returns a *jevError (kind "no_key") if the
-// credential can't be read - this is a normal, expected failure mode
-// in the demo (no key configured) and routes through on_unavailable
-// like any other transport failure, never panics or falls back to an
-// implicit allow.
-func newJevClient(cfg DynamicProvider) (*jevClient, error) {
-	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 1500 * time.Millisecond
+// providerTimeout is provider.timeout_ms as a duration: the single
+// deadline shared by credential resolution and the HTTP request.
+func providerTimeout(cfg DynamicProvider) time.Duration {
+	if cfg.TimeoutMs <= 0 {
+		return 1500 * time.Millisecond
 	}
-	key, err := resolveJevKey(cfg.Auth, timeout)
+	return time.Duration(cfg.TimeoutMs) * time.Millisecond
+}
+
+// newJevClient builds a client from Provider config, resolving the
+// bearer credential within ctx's deadline. Returns a *jevError (kind
+// "no_key") if the credential can't be read - this is a normal,
+// expected failure mode in the demo (no key configured) and routes
+// through on_unavailable like any other transport failure, never
+// panics or falls back to an implicit allow.
+func newJevClient(ctx context.Context, cfg DynamicProvider) (*jevClient, error) {
+	key, err := resolveJevKey(ctx, cfg.Auth)
 	if err != nil {
 		return nil, err
 	}
@@ -135,9 +140,8 @@ func newJevClient(cfg DynamicProvider) (*jevClient, error) {
 		baseURL: strings.TrimSuffix(cfg.BaseURL, "/"),
 		model:   cfg.Model,
 		key:     key,
-		timeout: timeout,
+		timeout: providerTimeout(cfg),
 		client: &http.Client{
-			Timeout: timeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return errRedirect
 			},
@@ -149,21 +153,19 @@ func newJevClient(cfg DynamicProvider) (*jevClient, error) {
 // requires the file to exist with mode 0600 (D3): any looser
 // permission is treated as "no key" rather than silently trusting a
 // key any local process could have tampered with or read.
-func resolveJevKey(auth DynamicAuth, timeout time.Duration) (string, error) {
+func resolveJevKey(ctx context.Context, auth DynamicAuth) (string, error) {
 	switch auth.Type {
 	case "none":
 		return "", nil
 	case "command":
 		// Workload identity / a short-lived token from a corporate
 		// broker (Tier A target credential model). stdout (trimmed)
-		// is the bearer token; a nonzero exit, exceeding timeout_ms, or
-		// empty output is a normal "no_key" failure, routed through on_unavailable like
+		// is the bearer token; a nonzero exit, exceeding ctx's deadline,
+		// or empty output is a normal "no_key" failure, routed through on_unavailable like
 		// any other transport failure.
 		if len(auth.Command) == 0 {
 			return "", &jevError{kind: "no_key", err: errors.New("auth.command not set")}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
 		cmd := exec.CommandContext(ctx, auth.Command[0], auth.Command[1:]...)
 		cmd.WaitDelay = 100 * time.Millisecond
 		out, err := cmd.Output()
