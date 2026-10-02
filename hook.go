@@ -148,16 +148,18 @@ var (
 )
 
 // scanTargets returns the strings the regex rules are matched
-// against. paths holds the primary extractContent value plus, for
-// file-mutating tools, each filePathFields value; every rule applies
-// to these. payloads holds each filePayloadFields value from Claude
-// Code's tool_input and MultiEdit's edits; path-only rules (target:
-// path) never apply to these.
+// against. For file-mutating tools, paths holds the primary
+// extractContent value plus each filePathFields value; every rule
+// applies to these. payloads holds each filePayloadFields value from
+// Claude Code's tool_input and MultiEdit's edits; path-only rules
+// (target: path) never apply to these. Every other tool's
+// extractContent value is a payload, so path-only rules never apply
+// to a read, search or shell command.
 func (r *Request) scanTargets() (paths, payloads []string) {
-	paths = []string{r.extractContent()}
 	if !fileMutatingTools[r.Tool] {
-		return paths, nil
+		return nil, []string{r.extractContent()}
 	}
+	paths = []string{r.extractContent()}
 	m := decodeObject(r.ToolInput)
 	objs := []map[string]any{m}
 	if edits, ok := m["edits"].([]any); ok {

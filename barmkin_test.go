@@ -304,6 +304,12 @@ func TestEngine_EvaluatePathRules_OnlyMatchPaths(t *testing.T) {
 		{"Edit .env path", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": "/repo/.env", "old_string": "a", "new_string": "b"}}, "dotenv-path"},
 		{"NotebookEdit path", map[string]any{"tool_name": "NotebookEdit", "tool_input": map[string]any{"notebook_path": "/home/user/.aws/credentials", "new_source": "x"}}, "credentials-file-path"},
 		{"Write private key content", map[string]any{"tool_name": "Write", "tool_input": map[string]any{"file_path": "/tmp/k.pem", "content": "-----BEGIN RSA PRIVATE KEY-----\nMIIE"}}, "private-key-block"},
+		{"Read .env path", map[string]any{"tool_name": "Read", "tool_input": map[string]any{"file_path": "/repo/.env"}}, ""},
+		{"Read ssh pub key", map[string]any{"tool_name": "Read", "tool_input": map[string]any{"file_path": "/home/u/.ssh/id_rsa.pub"}}, ""},
+		{"Grep ssh key path", map[string]any{"tool_name": "Grep", "tool_input": map[string]any{"pattern": "ssh-rsa", "path": "/home/u/.ssh/id_rsa"}}, ""},
+		{"Glob credentials path", map[string]any{"tool_name": "Glob", "tool_input": map[string]any{"pattern": "*", "path": "/home/u/.aws/credentials"}}, ""},
+		{"opencode read npmrc", map[string]any{"tool": "read", "action": "FileRead", "args": map[string]any{"path": "/home/u/.npmrc"}}, ""},
+		{"Edit .env via path", map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"path": "/repo/.env", "old_string": "a", "new_string": "b"}}, "dotenv-path"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
