@@ -1,0 +1,260 @@
+# Barmkin dynamic-hooks demo
+
+A lightweight, Claude-Code-CLI-only vertical slice of the "dynamic
+hooks" plan in `data/barmkin-dynamic-hooks/report.md` (this repo's
+sibling planning doc, not shipped here): a second evaluation stage
+inside `barmkin eval` that asks Jev (TypeSafe's "System One" decision
+model) a couple of yes/no hazard questions about a gated shell command,
+and composes the answers in code into `pass | escalate | deny`.
+Barmkin never lets the model say "allow" - the dynamic layer can only
+tighten a verdict, never loosen one.
+
+Run it:
+
+```
+./demo/run-demo.sh
+```
+
+## Captain revision (2026-10-01): internal gateway is now the default
+
+The model is hosted internally and served through an internal gateway;
+data stays inside the corporate boundary. This revises D1/D2/D3 from
+the original plan:
+
+- **`provider.base_url`** now defaults to an internal gateway in front
+  of the self-hosted model (Tier A), not OpenRouter direct. The demo
+  configs (`demo/rules-shadow.yaml`, `demo/rules-enforce.yaml`) point
+  at a placeholder host, `jev-gateway.internal.example` (an RFC 2606
+  `.example` domain that will never resolve) - point it at your real
+  gateway to use this for real. OpenRouter/TypeSafe direct (Tier B) is
+  now only a **fallback for isolated testing** without a gateway - see
+  `demo/rules-shadow-openrouter-fallback.yaml` and
+  `demo/rules-enforce-openrouter-fallback.yaml`.
+- **`provider.auth.type`** defaults to `none` (the gateway authenticates
+  the caller via workload identity - mTLS, SPNEGO, etc.) in the
+  gateway configs. `auth.type: command` runs a short-lived-token
+  broker (`command: ["/usr/local/bin/corp-token", "jev"]`) and uses
+  its trimmed stdout as the bearer token, for gateways that still want
+  a bearer header. `bearer_file` remains supported, but only as an
+  explicit, commented-out, local-testing-only override - never for the
+  internal gateway.
+- **`provider.redact`** is a new field: `default` (apply the built-in
+  redaction before egress - command text + cwd only, secret patterns
+  masked) or `off` (send the raw command/cwd). The gateway configs set
+  `redact: off`, since this data no longer crosses the corporate
+  boundary. The OpenRouter fallback configs keep `redact: default`,
+  since that path *does* leave the boundary. The redaction code itself
+  is unchanged and still runs for any external-egress fallback.
+
+**Open item:** the internal gateway/model host must itself serve the
+System One wire format this client speaks - `POST /v1/systemone`,
+each question carrying a required `"instructions"` string (see
+"instructions field" below) - or sit behind a format adapter that
+translates to it. **This has not been verified against any real
+internal host**; `demo/run-demo.sh` runs against the placeholder
+domain by default for exactly this reason. Point `base_url` at the
+real gateway and rerun to check.
+
+## What's in scope for this demo
+
+Per the captain's intent (lightest-weight option; originally direct
+egress with no corporate gateway/proxy, revised 2026-10-01 above to
+default to an internal gateway):
+
+- **Phase 1 refactor** (`decision.go`): a `Decision{Pass,Escalate,Deny}`
+  type and a Claude Code output adapter (`renderEscalateJSON`).
+  `barmkin stats` now counts `escalate` separately from `allow` and
+  summarizes the dynamic layer's unavailable rate and p50/p95 latency
+  (`main.go`'s `computeStats`); file-mutating tools (Write/Edit) are
+  now scanned on both target path and payload (`hook.go`'s
+  `scanTargets`; scope in the top-level README), with
+  new `rules.yaml` rules for `~/.ssh` key material, `authorized_keys`,
+  `.env`, and common credential files (report.md §2.7/§7); and the
+  golden-equivalence test now replays every rule example plus the full
+  false-positive corpus from the real `rules.yaml`, not a 3-command
+  sample. All of the above were previously **out of scope** for this
+  demo and are now complete.
+- **Phase 2 Jev client** (`jev.go`): System One wire format
+  (`POST {base_url}/v1/systemone`), each question carrying a required
+  `"instructions"` string (see below), HTTPS to `provider.base_url` -
+  an internal gateway (Tier A, now the default) or a direct provider
+  (Tier B, isolated-testing fallback) - pinned `jev-1.13`, strict
+  response validation (model spelling, answer shape, `noul` range), no
+  redirects (`CheckRedirect` always errors), a 0600 key file for the
+  `bearer_file` auth option (D3), and configurable redaction/truncation
+  before egress (D2: command text + cwd only, truncated to 4,000
+  chars, secret patterns masked when `provider.redact` isn't `off` -
+  never file contents).
+- **Instructions field:** TypeSafe's System One schema requires every
+  question to carry an `"instructions"` string (object/array also
+  accepted; `criteria` optional). An earlier version of this client
+  omitted it and OpenRouter rejected the request with `400
+  invalid_union` on `questions.*.instructions: expected string,
+  received undefined`. Fixed and **verified live against OpenRouter**:
+  `jevQuestion.Instructions` has no `omitempty` (so the key is always
+  present, even empty), `defaultQuestions` in `dynamic.go` carry real
+  instructions text, and `dynamic_test.go` has a marshal-level
+  regression guard plus a schema-enforcing stub test.
+- **Dynamic layer** (`dynamic.go`): the gate (bash tool calls only, in
+  `auto`/`bypassPermissions`/`dontAsk`, per D10), a built-in read-only
+  fast path, and the D6 allow-rule skip. Regex denies never reach Jev
+  (`engine.go` only calls the dynamic layer when the regex layer found
+  nothing to deny).
+- **Question set:** three. `no_secret_egress` (hazard, rejects at `p <=
+  0.03` → deny) and `no_outward_effect` (soft, rejects at `p <= 0.10` →
+  escalate) are the D1/D4 defaults from the full plan. `no_fetched_code_execution`
+  (hazard, rejects at `p <= 0.10` → deny) is new: it catches the
+  semantic variants of fetch-then-execute that `rules.yaml`'s
+  `curl-pipe-bash`/`wget-pipe-bash` regexes can't - e.g. a two-step
+  download-then-run, or piping into an interpreter other than `sh`/
+  `bash`. Thresholds override via `dynamic.thresholds` in config.
+- **Shadow → enforce flip:** `demo/rules-shadow.yaml` always passes and
+  logs what it would have done; `demo/rules-enforce.yaml` acts on the
+  composition and fails closed-to-manual (`escalate`) when Jev is
+  unreachable, with `bypassPermissions` mapped to `deny` (for both
+  on_unavailable and a composed soft-question escalation) until a human
+  verifies hook `ask` is honoured there (report.md §5c). Only Claude
+  Code can render `escalate` as an `ask` prompt; for any other agent
+  (e.g. the opencode plugin, which treats every exit 0 as allow)
+  `barmkin eval` renders `escalate` as a deny (exit 2) regardless of
+  capability negotiation (see the opencode adapter bullet below). A per-session
+  breaker (`~/.barmkin/state/<session>.json`, 0600, atomic
+  write-then-rename) opens after one consecutive availability failure
+  and short-circuits further network calls until its cooldown elapses -
+  this is what "the breaker opening when the key is pulled or timeout
+  hits" looks like in practice. A `refused_send` (the outgoing body
+  contained the bearer key or a `PRIVATE KEY` marker) is a content
+  refusal, not an outage: it goes through on_unavailable for that call
+  only and never counts toward the breaker. `provider.timeout_ms` is
+  one deadline shared by `auth.command` and the HTTP request.
+- **Audit log:** gains `decision: "escalate"`, a `layer` field
+  (`"dynamic"` when this stage ran, absent/omitted otherwise), and a
+  `dynamic` block with the outcome, would-be decision, error kind,
+  provider/model/latency, the deciding question and probabilities (even
+  on pass, so shadow-mode calibration is possible), breaker state, and
+  (new) `escalate_capable` - whether the caller declared the
+  `"escalate"` capability (see below). SIEM/log-consumer acceptance of
+  the new fields is explicitly deferred (D9) to a later milestone - not
+  checked by this demo.
+- **opencode adapter** (`plugins/barmkin.ts`), opencode 1.x, deny-only
+  (report.md §5c; 2.x's real `ask` via
+  `ctx.permission.hook("evaluate")` is out of scope, pending the
+  fleet's opencode-version inventory, D5):
+  - **Capability negotiation.** Every request the plugin sends now
+    carries `"capabilities":["escalate"]`, so the binary knows this
+    caller understands that outcome exists. The *rendered* decision
+    never changes because of it - opencode 1.x genuinely cannot ask, so
+    `escalate` is always a deny (exit 2) for this plugin either way -
+    but the audit log's `dynamic.escalate_capable` field records
+    whether the caller declared it, so operators can tell
+    capability-aware callers from old ones that never did.
+  - **Fail-closed timeout.** The plugin's own 3 s subprocess timeout
+    (`EVAL_TIMEOUT_MS`, well above `provider.timeout_ms`'s 1.5 s
+    internal deadline, so this only fires if the binary itself hangs
+    or is killed) used to always fail open. It now asks the binary
+    once at startup, via a new `barmkin dynamic-status` subcommand, and
+    fails closed on a per-call timeout only when that reported
+    `"enabled"` - a hung binary can no longer silently allow a call
+    once the dynamic layer is live. A failed/timed-out status check
+    itself leaves the plugin at today's fail-open default.
+
+Out of scope here (see report.md §5h "Phase 4" and the demo brief):
+GitHub Copilot (both the CLI and in VS Code) adapters, opencode 2.x's
+`ask` support, an `intent_coverage` question, a local daemon, and the
+Phase 0 harness contract checks (those need a human with a real
+account on a real harness). Tier A credential *shapes* (`auth.type:
+none`/`command`) are now in scope and implemented; a real internal
+gateway to point them at is not - that's the open item above.
+Write/Edit path gating was out of scope for the original demo brief
+but is now implemented (see the Phase 1 refactor bullet above).
+
+**Copilot CLI scope note:** an earlier pass of this work added a
+Copilot CLI output adapter and a `/etc/github-copilot/policy.d`
+install snippet (report.md's Copilot addendum, D5 sequencing - "Claude
+Code and Copilot CLI together first"). The captain has since scoped
+Copilot CLI and Copilot-in-VS-Code out of this PR; that work was
+removed and is tracked separately, not shipped here.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `decision.go` | `Decision` enum + Claude Code escalate-JSON output adapter |
+| `jev.go` | System One client: auth, redaction, transport, strict validation |
+| `dynamic.go` | gate, state builder, composition, per-session breaker |
+| `config.go` (`dynamic:` block) | provider/gate/on_unavailable/breaker config, `validate` support |
+| `log.go` (`DynamicAudit`) | the additive audit-log fields |
+| `dynamic_test.go` | golden equivalence, monotonicity, gating, composition, breaker, transport-failure-matrix tests |
+| `plugins/barmkin.ts` | opencode 1.x adapter: capability negotiation, fail-closed timeout |
+| `main.go` (`dynamic-status` subcommand) | reports "enabled"/"disabled" so the opencode plugin can set its own fail-open/closed timeout posture |
+| `demo/rules-shadow.yaml`, `demo/rules-enforce.yaml` | internal-gateway (Tier A) configs - the default |
+| `demo/rules-shadow-openrouter-fallback.yaml`, `demo/rules-enforce-openrouter-fallback.yaml` | OpenRouter-direct (Tier B) configs - isolated-testing fallback, used by `run-demo.sh` only when `demo/jev.key` is present |
+| `demo/run-demo.sh` | runs the gateway configs against sample commands, the fallback configs if a key is present, and prints the audit log |
+
+## The direct-egress finding (resolved)
+
+The original brief said: *"use direct egress (personal OpenRouter or
+TypeSafe key) for now... if direct egress is blocked in this
+environment, report that concretely rather than working around it."*
+
+While first building this demo, a single raw connectivity probe
+(`curl -X POST https://openrouter.ai/api/v1/systemone` run directly
+via the Bash tool, no key, just checking for the expected 401) was
+**refused by this task's own harness**, not by a network-level block:
+the auto-mode classifier denied it as `[Exfil Scouting]` - the same
+class of refusal the original scout report hit probing
+`bypassPermissions`. That raw probe was never retried.
+
+**Since then, a live round trip through this binary (not a raw curl)
+has been run and verified**, against both the (then-current)
+OpenRouter-direct config and, after the instructions-field fix above,
+again successfully. `demo/run-demo.sh`'s fallback section (OpenRouter
+direct, Tier B) exercises this automatically whenever `demo/jev.key`
+is present - real `request_id`, `latency_ms`, and probabilities show
+up in `demo/out/enforce-openrouter.log`'s `dynamic` block. One live
+run surfaced a real instance of Jev's documented "indirection"
+jaggedness: `curl ... -d @~/.ssh/id_rsa` (which reads and POSTs a
+private key via curl's `@file` syntax) was scored `0.97` on the
+then-current question wording, which asked the hazard question
+("Does the command send credentials...?") while composition reads a
+high `no_secret_egress` probability as *safe*. The model answered
+correctly; Barmkin read it backwards. Both questions are now worded
+so that "yes" means safe, matching the `no_*` ids and the
+`p <= threshold` reject rule.
+
+To exercise this yourself:
+
+```
+echo "sk-or-v1-..." > demo/jev.key   # a real OpenRouter key, hard credit cap
+chmod 600 demo/jev.key
+./demo/run-demo.sh
+```
+
+`jev.key` is git-ignored; never commit a real key. The gateway configs
+(`demo/rules-shadow.yaml`, `demo/rules-enforce.yaml`) still run by
+default against the placeholder `.example` host regardless of whether
+a key is present - the open item above (no real internal gateway to
+point them at yet) is independent of this finding.
+
+## Decisions this demo takes as given
+
+Per the captain's D1-D10 record (report.md, bottom), as revised
+2026-10-01: **D1** internal gateway in front of a self-hosted model
+(Tier A default), OpenRouter pinned `jev-1.13` kept as the Tier B
+isolated-testing fallback; **D2** redaction off by default for the
+gateway path (data stays inside the corporate boundary), still on by
+default for the Tier B fallback (command text + cwd only); **D3**
+workload identity / command-sourced token for the gateway (`auth.type:
+none` or `command`), a per-user capped key in a 0600 file kept as the
+Tier B fallback auth; **D4** escalate with breaker, `bypassPermissions
+→ deny` pending Phase 0; **D6** allow rules skip the dynamic layer;
+**D7** off-only env kill switch (not implemented in this demo - no
+`BARMKIN_DYNAMIC` env check - since the demo's own config files are
+the on/off switch; add it if this graduates past a demo); **D8** regex
+layer's existing fail-open postures unchanged; **D9** SIEM acceptance
+deferred; **D10** bash-only gating in unattended modes.
+
+**D7 update:** the off-only `BARMKIN_DYNAMIC=off` env kill switch is now
+implemented (`config.go`'s `applyDynamicKillSwitch`) - it can only
+disable the dynamic layer, never enable one a config leaves off, and
+`barmkin validate` reports when it's in effect.

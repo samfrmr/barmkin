@@ -1,0 +1,66 @@
+# Dynamic-hooks demo: Phase 3, enforce mode - Tier A, internal gateway.
+#
+# Captain revision (2026-10-01): the model is hosted internally and
+# served through an internal gateway. Data stays inside the corporate
+# boundary, so redaction for egress is no longer required by default.
+# base_url below is a placeholder (RFC 2606 .example domain - it will
+# not resolve) for "wherever the internal gateway actually lives";
+# point it at the real gateway host to use this for real.
+#
+# OPEN ITEM: the internal model host must itself serve the System One
+# wire format (POST /v1/systemone, with an "instructions" string per
+# question - see jev.go) or sit behind a format adapter that does.
+# This demo's client assumes System One; it has not been verified
+# against any internal host. See demo/README.md.
+#
+# OpenRouter/TypeSafe direct (Tier B) is now only a fallback for
+# isolated testing without a gateway - see
+# demo/rules-enforce-openrouter-fallback.yaml.
+#
+# Enforce mode acts on the composition: a clear hazard rejection
+# denies, a clear soft rejection escalates (Claude Code "ask", forcing
+# a human prompt even in auto mode). When Jev is unreachable (e.g. the
+# gateway itself is down) it fails closed-to-manual (escalate), with a
+# per-session breaker that opens after one failure and then
+# short-circuits - no network wait - until its cooldown elapses.
+
+rules:
+  - name: "rm-rf-force"
+    pattern: 'rm\s+-rf\b'
+    reason: "Recursive force-delete"
+    example: "rm -rf /tmp/foo"
+
+  - name: "test-deny"
+    pattern: 'BARMKIN-TEST-DENY'
+    reason: "Test vector (expected deny)"
+    example: "touch BARMKIN-TEST-DENY"
+
+log:
+  path: "./demo/out/enforce.log"
+
+dynamic:
+  enabled: true
+  mode: enforce
+  provider:
+    base_url: "https://jev-gateway.internal.example"   # placeholder: point at your real internal gateway
+    model: "jev-1.13"
+    auth:
+      type: none       # the gateway authenticates the caller (workload identity) - Tier A target
+      # type: command
+      # command: ["/usr/local/bin/corp-token", "jev"]
+      # type: bearer_file   # local-testing-only override
+      # path: "./demo/jev.key"
+    redact: off         # data never leaves the corporate boundary via the internal gateway
+    timeout_ms: 1500
+  gate:
+    tools: ["bash"]
+    permission_modes: ["auto", "bypassPermissions", "dontAsk"]
+    skip_read_only: true
+    skip_allow_rules: true
+  on_unavailable: escalate       # fail-closed-to-manual (D4)
+  on_unavailable_by_mode:
+    bypassPermissions: deny      # until a human verifies hook "ask" is honoured there (report.md §5c)
+  breaker:
+    enabled: true
+    open_after_failures: 1
+    cooldown_s: 60

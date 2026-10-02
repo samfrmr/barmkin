@@ -40,28 +40,57 @@ func (e *Engine) evaluate(input []byte) HookOutput {
 
 	var req Request
 	if err := json.Unmarshal(input, &req); err != nil {
-		e.record(Request{}, HookOutput{Decision: "allow", Reason: "invalid JSON (failing open)"}, "", start)
+		e.record(Request{}, HookOutput{Decision: "allow", Reason: "invalid JSON (failing open)"}, "", start, nil)
 		return HookOutput{Decision: "allow", Reason: "invalid JSON (failing open)"}
 	}
 
 	req.normalize()
 	content := req.extractContent()
-	matched := match(content, e.cfg.Rules)
+	var matched *Rule
+	paths, payloads := req.scanTargets()
+	for _, target := range paths {
+		if matched = match(target, e.cfg.Rules); matched != nil {
+			break
+		}
+	}
+	if matched == nil && len(payloads) > 0 {
+		rules := payloadRules(e.cfg.Rules)
+		for _, target := range payloads {
+			if matched = match(target, rules); matched != nil {
+				break
+			}
+		}
+	}
 
 	var result HookOutput
+	var dyn *dynamicResult
 	if matched != nil {
+		// Regex deny: the dynamic layer never sees this, and Jev is
+		// never called - a regex deny is final (monotonicity).
 		result = HookOutput{Decision: "deny", Rule: matched.Name, Reason: matched.Reason}
 	} else {
 		result = HookOutput{Decision: "allow"}
+		if e.cfg.Dynamic.Enabled {
+			allowMatched := matchedAllowRule(content, e.cfg.Rules)
+			if e.cfg.Dynamic.shouldGate(req, content, allowMatched) {
+				dyn = runDynamic(e.cfg.Dynamic, req, content)
+				result = dyn.toHookOutput()
+			}
+		}
 	}
 
-	e.record(req, result, content, start)
+	e.record(req, result, content, start, dyn)
+	result.ClaudeCode = req.isClaudeCode()
 	return result
 }
 
 // record writes the decision to the audit log and/or OTel exporter.
 // Called once per evaluation. Content is truncated for log readability.
-func (e *Engine) record(req Request, result HookOutput, content string, start time.Time) {
+// dyn is non-nil only when the dynamic layer ran, in which case the
+// log line gains the "layer", "permission_mode" and "dynamic" fields;
+// a nil dyn (the zero-config/disabled path) produces a byte-identical
+// line to before the dynamic layer existed.
+func (e *Engine) record(req Request, result HookOutput, content string, start time.Time, dyn *dynamicResult) {
 	elapsed := time.Since(start)
 
 	entry := AuditEntry{
@@ -74,6 +103,13 @@ func (e *Engine) record(req Request, result HookOutput, content string, start ti
 		Rule:         result.Rule,
 		Content:      truncate(content, 80),
 		Agent:        req.AgentID,
+	}
+
+	if dyn != nil {
+		entry.Layer = "dynamic"
+		entry.PermissionMode = req.PermissionMode
+		entry.Dynamic = dyn.toAudit()
+		entry.Dynamic.EscalateCapable = req.hasCapability("escalate")
 	}
 
 	if e.otel != nil {

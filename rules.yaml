@@ -111,6 +111,43 @@ rules:
     reason: "Clearing shell history"
     example: "history -c"
 
+  # ── Sensitive file paths (Write/Edit file_path, not just shell redirects) ─
+  # hook.go's scanTargets matches each file-mutating tool field (path,
+  # content, new_string, ...) on its own (report.md §2.7: previously only
+  # shell-redirect forms like the authorized-keys rule above caught this).
+  # These match the bare target path a file tool sends, so an Edit/Write
+  # aimed directly at one of these files is denied even with no shell
+  # command involved. target: "path" keeps them off payload fields
+  # (content, new_string, ...), so writing the text "app.env" is allowed.
+  # Anchored start-to-end with no embedded whitespace (^[^\s]*...$) so
+  # they match a bare path only, never a shell command that happens to
+  # mention one in passing (e.g. "cat ~/.env", already covered by
+  # env-file-exfil above) - a shell command always has at least one
+  # space (the verb), a file_path value never does.
+  - name: "ssh-private-key-path"
+    pattern: '^[^\s]*\.ssh/(id_rsa|id_dsa|id_ecdsa|id_ed25519)(\.pub)?$'
+    reason: "Direct write/edit of an SSH private key file"
+    example: "/home/user/.ssh/id_rsa"
+    target: "path"
+
+  - name: "ssh-authorized-keys-path"
+    pattern: '^[^\s]*\.ssh/authorized_keys$'
+    reason: "Direct write/edit of SSH authorized_keys"
+    example: "/home/user/.ssh/authorized_keys"
+    target: "path"
+
+  - name: "dotenv-path"
+    pattern: '^[^\s]*\.env$'
+    reason: "Direct write/edit of a .env secrets file"
+    example: "/home/user/project/.env"
+    target: "path"
+
+  - name: "credentials-file-path"
+    pattern: '^[^\s]*(\.aws/credentials|\.netrc|\.git-credentials|\.npmrc)$'
+    reason: "Direct write/edit of a credentials file"
+    example: "/home/user/.aws/credentials"
+    target: "path"
+
   # ── Database ─────────────────────────────────────────────────────────
   - name: "truncate-table"
     pattern: '(?i)truncate\s+table\b'

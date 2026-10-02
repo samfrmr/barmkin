@@ -30,16 +30,45 @@ type DecisionLogger struct {
 // AuditEntry is the on-wire audit record. Field names match sondera's
 // format, with barmkin-specific additions (rule, content, agent).
 type AuditEntry struct {
-	TS           string  `json:"ts"`                     // RFC3339 UTC timestamp (set by Write)
-	TrajectoryID string  `json:"trajectory_id"`           // session ID
-	Tool         string  `json:"tool"`                    // e.g. "bash", "read", "edit"
-	Action       string  `json:"action"`                  // e.g. "ShellCommand", "FileRead"
-	Decision     string  `json:"decision"`                // "allow" or "deny"
-	Reason       string  `json:"reason,omitempty"`         // rule reason, shown to LLM
-	DurationMs   float64 `json:"duration_ms"`             // evaluation time
-	Rule    string `json:"rule,omitempty"`    // barmkin: matched rule name
-	Content string `json:"content,omitempty"` // barmkin: truncated command content
-	Agent   string `json:"agent,omitempty"`   // barmkin: agent identifier
+	TS           string  `json:"ts"`                // RFC3339 UTC timestamp (set by Write)
+	TrajectoryID string  `json:"trajectory_id"`     // session ID
+	Tool         string  `json:"tool"`              // e.g. "bash", "read", "edit"
+	Action       string  `json:"action"`            // e.g. "ShellCommand", "FileRead"
+	Decision     string  `json:"decision"`          // "allow" or "deny"
+	Reason       string  `json:"reason,omitempty"`  // rule reason, shown to LLM
+	DurationMs   float64 `json:"duration_ms"`       // evaluation time
+	Rule         string  `json:"rule,omitempty"`    // barmkin: matched rule name
+	Content      string  `json:"content,omitempty"` // barmkin: truncated command content
+	Agent        string  `json:"agent,omitempty"`   // barmkin: agent identifier
+
+	// Dynamic-layer additions (all omitempty, so lines without the
+	// dynamic layer are byte-identical to before it existed).
+	Layer          string        `json:"layer,omitempty"`           // "regex" | "dynamic" (absent == regex, for old lines)
+	PermissionMode string        `json:"permission_mode,omitempty"` // from the Claude Code hook input when present
+	Dynamic        *DynamicAudit `json:"dynamic,omitempty"`
+}
+
+// DynamicAudit is the per-evaluation detail logged when the dynamic
+// (Jev) layer ran. See report.md §5f for the field meanings; "decision"
+// (AuditEntry.Decision) already carries the acted-on outcome including
+// its new "escalate" value, so this block is the *why*.
+type DynamicAudit struct {
+	Mode             string             `json:"mode"`                     // shadow | enforce
+	Outcome          string             `json:"outcome"`                  // pass | escalate | deny (what actually happened)
+	WouldDecision    string             `json:"would_decision,omitempty"` // what enforce mode would have done
+	FailMode         string             `json:"fail_mode,omitempty"`      // set when Outcome came from on_unavailable/breaker
+	Error            string             `json:"error,omitempty"`          // timeout | network | http_<code> | malformed_response | no_key | breaker_open | ...
+	Provider         string             `json:"provider,omitempty"`
+	Model            string             `json:"model,omitempty"`
+	RequestID        string             `json:"request_id,omitempty"`
+	LatencyMs        float64            `json:"latency_ms,omitempty"`
+	InputTokens      int                `json:"input_tokens,omitempty"`
+	CostUSD          float64            `json:"cost_usd,omitempty"`
+	DecidingQuestion string             `json:"deciding_question,omitempty"`
+	Probabilities    map[string]float64 `json:"probabilities,omitempty"`
+	Thresholds       map[string]float64 `json:"thresholds,omitempty"`
+	Breaker          string             `json:"breaker,omitempty"`          // closed | open | half_open
+	EscalateCapable  bool               `json:"escalate_capable,omitempty"` // caller declared "escalate" in its capabilities (opencode 1.x capability negotiation, report.md §5c); an escalate still renders as deny for any non-Claude-Code caller regardless - this is observability only
 }
 
 // newDecisionLogger opens (or creates) the log file for appending.

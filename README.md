@@ -6,7 +6,9 @@ Runs as a subprocess per invocation. Config is a YAML file of regex rules.
 
 ## Scope
 
-Barmkin matches command strings. It does not read file contents or inspect command output. If you need semantic evaluation of what an agent writes or retrieves, use sondera, which adds Cedar policies and LLM classification on top.
+Barmkin matches the strings in a tool call: shell commands, plus the target path and written payload (`content`, `new_string`, ...) of file-mutating tools such as Write and Edit. Search patterns and queries of read-only tools (Read, Grep, Glob, WebSearch, and any `*Search` action) are never scanned, and path-only rules (`target: "path"`, e.g. `.env` or `~/.ssh/id_rsa`) match only a file tool's target path, never its payload. It does not read files from disk or inspect command output. If you need semantic evaluation of what an agent writes or retrieves, use sondera, which adds Cedar policies and LLM classification on top.
+
+An optional, off-by-default dynamic layer (`dynamic:` in rules.yaml) can ask a hosted classifier yes/no hazard questions about gated shell commands. It can only tighten a verdict to escalate or deny, never allow. See [demo/README.md](demo/README.md).
 
 ## Why the name?
 
@@ -31,6 +33,9 @@ A PreToolUse hook in `~/.claude/settings.json` runs `barmkin eval` on every `Bas
 
 The plugin at `plugins/barmkin.ts` spawns `barmkin eval` on every `tool.execute.before` event. Installed to `~/.config/opencode/plugins/`.
 
+> GitHub Copilot CLI and GitHub Copilot in VS Code are out of scope for
+> this POC and tracked separately.
+
 ## Commands
 
 ```
@@ -43,7 +48,7 @@ barmkin version
 
 ## Rules
 
-45 rules across 9 categories. Every rule has an `example` field that `go test` verifies automatically. Adding a rule with an example adds a test.
+49 rules across 10 categories. Every rule has an `example` field that `go test` verifies automatically. Adding a rule with an example adds a test.
 
 | Category | Rules |
 |----------|-------|
@@ -53,6 +58,7 @@ barmkin version
 | Exfiltration | curl\|bash, wget\|bash, scp ssh keys, curl upload, tar\|ssh, nc pipe, rsync remote |
 | Supply chain | npm git+ install, pip untrusted URL |
 | Obfuscation | base64+exec, eval hex |
+| Sensitive paths | Write/Edit targets: SSH keys, authorized_keys, .env, credentials files |
 | Secrets | AWS keys, private keys, GitHub/Slack/GitLab tokens, .env files |
 | Persistence | authorized_keys, chown system, ssh tunnel, history clear |
 | Container | docker prune --all, docker rm all, kubectl delete namespace |
@@ -67,6 +73,7 @@ Edit `/etc/barmkin/rules.yaml`:
   action: "deny"                      # or "allow" to override deny rules
   reason: "Why it's blocked"
   example: "dangerous command --flag"  # must match, verified by tests
+  # target: "path"                    # optional: file-tool target path only, never payloads
 ```
 
 Run `barmkin validate` after editing.
