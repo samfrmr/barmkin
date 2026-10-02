@@ -1,0 +1,9 @@
+# no-mistakes repo config.
+#
+# This fork has no CI configured (no .github/workflows) and no history
+# of any check runs. Declaring no_ci here tells the no-mistakes CI
+# monitor that a zero-check result on the PR head is expected, not a
+# sign that checks never registered - it treats that empty result as
+# all-checks-passed instead of waiting indefinitely. Honoured only from
+# the trusted default-branch copy of this file.
+no_ci: true
