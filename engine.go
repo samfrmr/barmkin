@@ -109,6 +109,7 @@ func (e *Engine) record(req Request, result HookOutput, content string, start ti
 		entry.Layer = "dynamic"
 		entry.PermissionMode = req.PermissionMode
 		entry.Dynamic = dyn.toAudit()
+		entry.Dynamic.EscalateCapable = req.hasCapability("escalate")
 	}
 
 	if e.otel != nil {

@@ -67,7 +67,8 @@ type DynamicAudit struct {
 	DecidingQuestion string             `json:"deciding_question,omitempty"`
 	Probabilities    map[string]float64 `json:"probabilities,omitempty"`
 	Thresholds       map[string]float64 `json:"thresholds,omitempty"`
-	Breaker          string             `json:"breaker,omitempty"` // closed | open | half_open
+	Breaker          string             `json:"breaker,omitempty"`          // closed | open | half_open
+	EscalateCapable  bool               `json:"escalate_capable,omitempty"` // caller declared "escalate" in its capabilities (opencode 1.x capability negotiation, report.md §5c); an escalate still renders as deny for any non-Claude-Code caller regardless - this is observability only
 }
 
 // newDecisionLogger opens (or creates) the log file for appending.

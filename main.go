@@ -60,6 +60,8 @@ func main() {
 		cmdTest(configPath)
 	case "stats":
 		cmdStats(configPath)
+	case "dynamic-status":
+		cmdDynamicStatus(configPath)
 	case "version":
 		fmt.Printf("barmkin v%s\n", version)
 	default:
@@ -430,6 +432,29 @@ func cmdStats(configPath string) {
 	}
 }
 
+// cmdDynamicStatus reports whether the dynamic layer is enabled, for a
+// caller (the opencode plugin) that needs this to pick its own
+// fail-open/fail-closed posture on its own harness-level timeout,
+// independent of barmkin's internal provider.timeout_ms deadline
+// (report.md §5c, "opencode 1.x": "the plugin should fail closed on
+// timeout when the binary reports that the dynamic layer is enabled").
+// Always prints exactly "enabled" or "disabled" and exits 0, including
+// on a config error, so a caller never has to distinguish "disabled"
+// from "couldn't tell" via exit code - it fails safe to "disabled"
+// instead, matching barmkin's own fail-open-at-this-layer default.
+func cmdDynamicStatus(configPath string) {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		fmt.Println("disabled")
+		return
+	}
+	if cfg.Dynamic.Enabled {
+		fmt.Println("enabled")
+	} else {
+		fmt.Println("disabled")
+	}
+}
+
 // usage prints the help text to stderr.
 func usage() {
 	fmt.Fprint(os.Stderr, `barmkin v`+version+` - regex guardrail for coding agents
@@ -437,11 +462,12 @@ func usage() {
 Usage: barmkin [-config <path>] [-v] <command>
 
 Commands:
-  eval       Evaluate from stdin (exit 2 = deny, exit 0 = allow)
-  validate   Validate config file
-  test       Run test vectors (deny + allow)
-  stats      Show statistics from log file
-  version    Print version
+  eval            Evaluate from stdin (exit 2 = deny, exit 0 = allow)
+  validate        Validate config file
+  test            Run test vectors (deny + allow)
+  stats           Show statistics from log file
+  dynamic-status  Print "enabled" or "disabled" for the dynamic layer
+  version         Print version
 `)
 }
 

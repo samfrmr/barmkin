@@ -1,10 +1,61 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// captureStdout redirects os.Stdout for the duration of fn and returns
+// what it wrote. Used for cmdDynamicStatus, whose contract is its
+// printed line (consumed by the opencode plugin's own stdout read).
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = orig
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+func TestCmdDynamicStatus_Enabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(path, []byte("dynamic:\n  enabled: true\n  mode: shadow\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := captureStdout(t, func() { cmdDynamicStatus(path) })
+	if got != "enabled\n" {
+		t.Errorf("got %q, want %q", got, "enabled\n")
+	}
+}
+
+func TestCmdDynamicStatus_Disabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(path, []byte("rules: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := captureStdout(t, func() { cmdDynamicStatus(path) })
+	if got != "disabled\n" {
+		t.Errorf("got %q, want %q", got, "disabled\n")
+	}
+}
+
+func TestCmdDynamicStatus_ConfigErrorFailsSafeToDisabled(t *testing.T) {
+	got := captureStdout(t, func() { cmdDynamicStatus(filepath.Join(t.TempDir(), "missing.yaml")) })
+	if got != "disabled\n" {
+		t.Errorf("got %q, want %q", got, "disabled\n")
+	}
+}
 
 func writeLogLines(t *testing.T, lines ...AuditEntry) string {
 	t.Helper()

@@ -135,7 +135,7 @@ func TestMonotonicity_RegexDenyNeverCallsJev(t *testing.T) {
 
 func TestMonotonicity_DynamicNeverEmitsAllowWhenGatedAndRejected(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.01, "no_outward_effect": 0.99})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.01, "no_outward_effect": 0.99, "no_fetched_code_execution": 0.99})
 	}))
 	defer srv.Close()
 
@@ -254,6 +254,11 @@ func TestComposeOutcome(t *testing.T) {
 		{"both reject: hazard wins", map[string]float64{"no_secret_egress": 0.01, "no_outward_effect": 0.01}, Deny},
 		{"middle band passes", map[string]float64{"no_secret_egress": 0.5, "no_outward_effect": 0.5}, Pass},
 		{"boundary exactly at threshold rejects", map[string]float64{"no_secret_egress": 0.03, "no_outward_effect": 0.95}, Deny},
+		{"fetched-code hazard rejection", map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.02}, Deny},
+		{"fetched-code boundary exactly at threshold rejects", map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.10}, Deny},
+		{"fetched-code middle band passes", map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.5}, Pass},
+		{"fetched-code just above threshold passes", map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.11}, Pass},
+		{"fetched-code hazard beats soft rejection", map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.01, "no_fetched_code_execution": 0.02}, Deny},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -299,7 +304,7 @@ func TestOnUnavailableOutcome(t *testing.T) {
 
 func TestShadowMode_AlwaysPassesButLogsWouldDecision(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.01, "no_outward_effect": 0.95})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.01, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.95})
 	}))
 	defer srv.Close()
 
@@ -343,7 +348,7 @@ func TestShadowMode_UnavailablePassesButLogsWouldDecision(t *testing.T) {
 
 func TestEnforceMode_ActsOnComposition(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.01, "no_outward_effect": 0.95})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.01, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.95})
 	}))
 	defer srv.Close()
 
@@ -365,7 +370,7 @@ func TestEnforceMode_ActsOnComposition(t *testing.T) {
 func TestEnforceMode_BypassPermissionsTurnsComposedEscalateIntoDeny(t *testing.T) {
 	withTempHome(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.01})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.01, "no_fetched_code_execution": 0.95})
 	}))
 	defer srv.Close()
 
@@ -477,7 +482,7 @@ func TestBreaker_ResetsOnSuccess(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.95})
 	}))
 	defer srv.Close()
 
@@ -632,7 +637,7 @@ func TestRunDynamic_RedactOffSendsRawCommand(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotBody, _ = io.ReadAll(r.Body)
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9, "no_fetched_code_execution": 0.9})
 	}))
 	defer srv.Close()
 
@@ -651,7 +656,7 @@ func TestRunDynamic_RedactDefaultMasksSecrets(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotBody, _ = io.ReadAll(r.Body)
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9, "no_fetched_code_execution": 0.9})
 	}))
 	defer srv.Close()
 
@@ -722,7 +727,7 @@ func TestJevClient_Redirect(t *testing.T) {
 func TestJevClient_Timeout(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(100 * time.Millisecond)
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9, "no_fetched_code_execution": 0.9})
 	}))
 	defer srv.Close()
 
@@ -860,7 +865,7 @@ func TestJevClient_MissingInstructions400(t *testing.T) {
 				return
 			}
 		}
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.9, "no_outward_effect": 0.9, "no_fetched_code_execution": 0.9})
 	}))
 	defer srv.Close()
 	// The current client always sends the key (see the marshal test
@@ -1020,7 +1025,7 @@ func assertAskSucceeds(t *testing.T, baseURL string) {
 func TestEvalOutput_EscalateIsAskOnlyForClaudeCode(t *testing.T) {
 	withTempHome(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.01})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.01, "no_fetched_code_execution": 0.95})
 	}))
 	defer srv.Close()
 
@@ -1052,6 +1057,72 @@ func TestEvalOutput_EscalateIsAskOnlyForClaudeCode(t *testing.T) {
 	}
 }
 
+// TestEvalOutput_OpencodeCapabilityNegotiation locks in the opencode
+// 1.x contract (report.md §5c): declaring "capabilities":["escalate"]
+// never changes the rendered decision or exit code - that stays a
+// plain deny either way, since opencode 1.x cannot ask regardless -
+// but it is recorded in the audit log's dynamic block so operators can
+// tell capability-aware callers from old ones that never declared it.
+func TestEvalOutput_OpencodeCapabilityNegotiation(t *testing.T) {
+	withTempHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.01, "no_fetched_code_execution": 0.95})
+	}))
+	defer srv.Close()
+
+	logPath := filepath.Join(t.TempDir(), "audit.log")
+	cfg := &Config{
+		Log: Log{Path: logPath},
+		Dynamic: Dynamic{
+			Enabled: true, Mode: "enforce", OnUnavailable: "escalate",
+			Provider: DynamicProvider{BaseURL: srv.URL, Model: "jev-1.13", Auth: DynamicAuth{Type: "none"}, TimeoutMs: 1000},
+			Gate:     DynamicGate{Tools: []string{"bash"}, PermissionModes: []string{"auto"}},
+		},
+	}
+	cfg.Dynamic.applyDefaults()
+
+	cases := []struct {
+		name       string
+		req        string
+		wantCapble bool
+	}{
+		{"capability declared", `{"trajectory_id":"s-oc1","tool":"bash","action":"ShellCommand","args":{"command":"npm publish"},"capabilities":["escalate"]}`, true},
+		{"capability not declared", `{"trajectory_id":"s-oc2","tool":"bash","action":"ShellCommand","args":{"command":"npm publish"}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEngine(cfg)
+			result := e.evaluate([]byte(tc.req))
+			e.close()
+			stdout, stderr, code := renderEvalOutput(result)
+			if code != 2 || stdout != "" || !strings.Contains(stderr, "no_outward_effect") {
+				t.Errorf("got stdout=%q stderr=%q code=%d, want deny (exit 2) regardless of capability", stdout, stderr, code)
+			}
+		})
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d log lines, want 2", len(lines))
+	}
+	for i, line := range lines {
+		var entry AuditEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		if entry.Dynamic == nil {
+			t.Fatalf("line %d: missing dynamic block", i)
+		}
+		if entry.Dynamic.EscalateCapable != cases[i].wantCapble {
+			t.Errorf("line %d: escalate_capable = %v, want %v", i, entry.Dynamic.EscalateCapable, cases[i].wantCapble)
+		}
+	}
+}
+
 // ── refused_send is content hygiene, not unavailability ──────────────────
 
 func TestBreaker_RefusedSendDoesNotOpenBreaker(t *testing.T) {
@@ -1059,7 +1130,7 @@ func TestBreaker_RefusedSendDoesNotOpenBreaker(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.95})
 	}))
 	defer srv.Close()
 
@@ -1094,7 +1165,7 @@ func TestRunDynamic_TimeoutCoversAuthCommandAndHTTP(t *testing.T) {
 		case <-r.Context().Done():
 			return
 		}
-		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95})
+		writeSystemOneResponse(w, map[string]float64{"no_secret_egress": 0.95, "no_outward_effect": 0.95, "no_fetched_code_execution": 0.95})
 	}))
 	defer srv.Close()
 

@@ -9,6 +9,19 @@
 // reason, which opencode shows to the LLM as a tool failure. On allow
 // it returns silently.
 //
+// Dynamic layer (opencode 1.x, deny-only - report.md §5c): the binary's
+// optional second evaluation stage can additionally produce "escalate".
+// opencode 1.x's tool.execute.before can only pass or throw - it has no
+// way to prompt a human - so the binary always renders escalate as a
+// deny (exit 2) for this plugin, never exit 0. This plugin declares
+// "capabilities":["escalate"] on every request so the binary knows this
+// caller understands that outcome exists (capability negotiation is
+// mandatory for opencode per the design report: without it, an old
+// plugin that ignored stdout could misread a future ask-style escalate
+// rendering as exit-0 allow). opencode 2.x gets a real ask via
+// ctx.permission.hook("evaluate") and needs its own plugin variant -
+// out of scope here.
+//
 // All telemetry (OTel, audit log, stats) is handled by the Go binary.
 // The plugin is intentionally thin - just normalize + spawn + check exit code.
 //
@@ -70,6 +83,38 @@ function toolArgs(tool: string, a: Record<string, unknown>): Record<string, unkn
   }
 }
 
+// ── Dynamic-layer status ────────────────────────────────────────────────
+// Queried once at plugin startup (not per-call, to avoid adding
+// latency) so a per-call timeout below knows whether to fail open
+// (today's behavior, safe when there's no semantic layer to bypass) or
+// fail closed (the dynamic layer is enabled, so a hung binary must
+// never silently allow the call - report.md §5c: "the plugin should
+// fail closed on timeout when the binary reports that the dynamic
+// layer is enabled"). Left false - fail open - on any spawn error,
+// non-zero exit, or timeout of the status check itself, since only an
+// explicit "enabled" report from the binary should tighten this.
+
+let dynamicLayerEnabled = false
+
+async function checkDynamicStatus(): Promise<void> {
+  try {
+    const proc = Bun.spawn({ cmd: [BIN, "dynamic-status"], stdout: "pipe", stderr: "pipe" })
+    const code = await Promise.race<number | null>([
+      proc.exited,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), EVAL_TIMEOUT_MS)),
+    ])
+    if (code !== 0) {
+      try { proc.kill() } catch {}
+      return
+    }
+    const out = await Bun.readableStreamToText(proc.stdout)
+    dynamicLayerEnabled = out.trim() === "enabled"
+  } catch {
+    // Spawn failure - leave dynamicLayerEnabled false, consistent with
+    // evaluate()'s own fail-open on a broken binary.
+  }
+}
+
 // ── Evaluate ─────────────────────────────────────────────────────────────
 // Spawn `barmkin eval`, pipe the AdapterRequest JSON to stdin,
 // and check the exit code.
@@ -90,6 +135,7 @@ async function evaluate(
     args: toolArgs(tool, args),
     cwd,
     event_type: "before",
+    capabilities: ["escalate"],
   })
 
   try {
@@ -111,7 +157,10 @@ async function evaluate(
 
     if (code === null) {
       try { proc.kill() } catch {}
-      return null // timeout - fail open
+      if (dynamicLayerEnabled) {
+        return "barmkin timed out with the dynamic layer enabled; failing closed"
+      }
+      return null // timeout, no dynamic layer to bypass - fail open
     }
 
     // Exit 2 = deny. Read stderr for the reason.
@@ -134,6 +183,10 @@ export const BarmkinPlugin: Plugin = async (ctx: any) => {
 
   // Store the SDK client for toast notifications.
   client = ctx.client
+
+  // Learn the binary's dynamic-layer posture once, up front, so a
+  // later per-call timeout knows whether to fail open or closed.
+  await checkDynamicStatus()
 
   // Fire startup toast if toasts are enabled.
   toast("info", DRY_RUN ? "dry-run mode" : "enforcing")

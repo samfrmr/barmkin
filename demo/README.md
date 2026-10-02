@@ -100,11 +100,14 @@ default to an internal gateway):
   fast path, and the D6 allow-rule skip. Regex denies never reach Jev
   (`engine.go` only calls the dynamic layer when the regex layer found
   nothing to deny).
-- **Question set:** exactly two, per the demo brief: `no_secret_egress`
-  (hazard, rejects at `p <= 0.03` → deny) and `no_outward_effect`
-  (soft, rejects at `p <= 0.10` → escalate). Thresholds are the D1/D4
-  defaults from the full plan; override via `dynamic.thresholds` in
-  config.
+- **Question set:** three. `no_secret_egress` (hazard, rejects at `p <=
+  0.03` → deny) and `no_outward_effect` (soft, rejects at `p <= 0.10` →
+  escalate) are the D1/D4 defaults from the full plan. `no_fetched_code_execution`
+  (hazard, rejects at `p <= 0.10` → deny) is new: it catches the
+  semantic variants of fetch-then-execute that `rules.yaml`'s
+  `curl-pipe-bash`/`wget-pipe-bash` regexes can't - e.g. a two-step
+  download-then-run, or piping into an interpreter other than `sh`/
+  `bash`. Thresholds override via `dynamic.thresholds` in config.
 - **Shadow → enforce flip:** `demo/rules-shadow.yaml` always passes and
   logs what it would have done; `demo/rules-enforce.yaml` acts on the
   composition and fails closed-to-manual (`escalate`) when Jev is
@@ -113,7 +116,8 @@ default to an internal gateway):
   verifies hook `ask` is honoured there (report.md §5c). Only Claude
   Code can render `escalate` as an `ask` prompt; for any other agent
   (e.g. the opencode plugin, which treats every exit 0 as allow)
-  `barmkin eval` renders `escalate` as a deny (exit 2). A per-session
+  `barmkin eval` renders `escalate` as a deny (exit 2) regardless of
+  capability negotiation (see the opencode adapter bullet below). A per-session
   breaker (`~/.barmkin/state/<session>.json`, 0600, atomic
   write-then-rename) opens after one consecutive availability failure
   and short-circuits further network calls until its cooldown elapses -
@@ -127,19 +131,42 @@ default to an internal gateway):
   (`"dynamic"` when this stage ran, absent/omitted otherwise), and a
   `dynamic` block with the outcome, would-be decision, error kind,
   provider/model/latency, the deciding question and probabilities (even
-  on pass, so shadow-mode calibration is possible), and breaker state.
-  SIEM/log-consumer acceptance of the new fields is explicitly deferred
-  (D9) to a later milestone - not checked by this demo.
+  on pass, so shadow-mode calibration is possible), breaker state, and
+  (new) `escalate_capable` - whether the caller declared the
+  `"escalate"` capability (see below). SIEM/log-consumer acceptance of
+  the new fields is explicitly deferred (D9) to a later milestone - not
+  checked by this demo.
+- **opencode adapter** (`plugins/barmkin.ts`), opencode 1.x, deny-only
+  (report.md §5c; 2.x's real `ask` via
+  `ctx.permission.hook("evaluate")` is out of scope, pending the
+  fleet's opencode-version inventory, D5):
+  - **Capability negotiation.** Every request the plugin sends now
+    carries `"capabilities":["escalate"]`, so the binary knows this
+    caller understands that outcome exists. The *rendered* decision
+    never changes because of it - opencode 1.x genuinely cannot ask, so
+    `escalate` is always a deny (exit 2) for this plugin either way -
+    but the audit log's `dynamic.escalate_capable` field records
+    whether the caller declared it, so operators can tell
+    capability-aware callers from old ones that never did.
+  - **Fail-closed timeout.** The plugin's own 3 s subprocess timeout
+    (`EVAL_TIMEOUT_MS`, well above `provider.timeout_ms`'s 1.5 s
+    internal deadline, so this only fires if the binary itself hangs
+    or is killed) used to always fail open. It now asks the binary
+    once at startup, via a new `barmkin dynamic-status` subcommand, and
+    fails closed on a per-call timeout only when that reported
+    `"enabled"` - a hung binary can no longer silently allow a call
+    once the dynamic layer is live. A failed/timed-out status check
+    itself leaves the plugin at today's fail-open default.
 
 Out of scope here (see report.md §5h "Phase 4" and the demo brief):
-opencode and GitHub Copilot (both the CLI and in VS Code) adapters, an
-`intent_coverage` question, a local daemon, and the Phase 0 harness
-contract checks (those need a human with a real account on a real
-harness). Tier A credential *shapes* (`auth.type: none`/`command`) are
-now in scope and implemented; a real internal gateway to point them at
-is not - that's the open item above. Write/Edit path gating was out of
-scope for the original demo brief but is now implemented (see the
-Phase 1 refactor bullet above).
+GitHub Copilot (both the CLI and in VS Code) adapters, opencode 2.x's
+`ask` support, an `intent_coverage` question, a local daemon, and the
+Phase 0 harness contract checks (those need a human with a real
+account on a real harness). Tier A credential *shapes* (`auth.type:
+none`/`command`) are now in scope and implemented; a real internal
+gateway to point them at is not - that's the open item above.
+Write/Edit path gating was out of scope for the original demo brief
+but is now implemented (see the Phase 1 refactor bullet above).
 
 **Copilot CLI scope note:** an earlier pass of this work added a
 Copilot CLI output adapter and a `/etc/github-copilot/policy.d`
@@ -158,6 +185,8 @@ removed and is tracked separately, not shipped here.
 | `config.go` (`dynamic:` block) | provider/gate/on_unavailable/breaker config, `validate` support |
 | `log.go` (`DynamicAudit`) | the additive audit-log fields |
 | `dynamic_test.go` | golden equivalence, monotonicity, gating, composition, breaker, transport-failure-matrix tests |
+| `plugins/barmkin.ts` | opencode 1.x adapter: capability negotiation, fail-closed timeout |
+| `main.go` (`dynamic-status` subcommand) | reports "enabled"/"disabled" so the opencode plugin can set its own fail-open/closed timeout posture |
 | `demo/rules-shadow.yaml`, `demo/rules-enforce.yaml` | internal-gateway (Tier A) configs - the default |
 | `demo/rules-shadow-openrouter-fallback.yaml`, `demo/rules-enforce-openrouter-fallback.yaml` | OpenRouter-direct (Tier B) configs - isolated-testing fallback, used by `run-demo.sh` only when `demo/jev.key` is present |
 | `demo/run-demo.sh` | runs the gateway configs against sample commands, the fallback configs if a key is present, and prints the audit log |

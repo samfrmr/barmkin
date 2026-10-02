@@ -29,6 +29,7 @@ type Request struct {
 	Args         map[string]any `json:"args"`
 	Cwd          string         `json:"cwd,omitempty"`
 	EventType    string         `json:"event_type,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"` // wire-protocol features the caller understands (opencode 1.x: must declare "escalate" - report.md §5c)
 
 	// Claude Code fields (from PreToolUse hook)
 	ToolName       string          `json:"tool_name"`
@@ -84,6 +85,21 @@ func (r *Request) normalize() {
 // agent_id it carries (Claude Code sets agent_id for subagent calls).
 func (r *Request) isClaudeCode() bool {
 	return r.ToolName != "" || r.SessionID != ""
+}
+
+// hasCapability reports whether the caller declared understanding of
+// the named wire-protocol feature. Barmkin's safe default (an escalate
+// renders as a deny for any non-Claude-Code caller, main.go's
+// renderEvalOutput) never depends on this - it only ever widens what
+// gets recorded for operators, so a capability-unaware caller is never
+// put at risk by this check.
+func (r *Request) hasCapability(name string) bool {
+	for _, c := range r.Capabilities {
+		if strings.EqualFold(c, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractContent pulls the scannable text from the request.
