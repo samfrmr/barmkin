@@ -310,6 +310,7 @@ The suite in `plugins/claude-code/e2e` starts a real `barmkin monitor` process f
 - Unknown sessions deny. Every fixture request about an unregistered session fails `unknown_session`. A resumed conversation the monitor never saw, and a session whose journal was deleted, come back with the untrusted leg raised.
 - A restart keeps the taint. A clean stop keeps every leg and drops pre-registrations. After a `SIGKILL`, the taint just reported survives and every other lineage comes back tainted by `monitor_restart`.
 - Every invalid request fixture is refused with its code and changes nothing. A request from another contract version gets `version_mismatch` from every operation and creates no session. Unknown paths, other methods and oversized bodies get `bad_request`. Malformed hook input makes the gate deny.
+- The checks themselves can fail. The suite runs the tighten-only checks against a monitor that lowers a leg without the capability, and the unavailable-monitor checks against a shim that fails open, and requires both to fail. The monitor's Go tests (`TestNoAnswerBeforeTheJournalReturns`) hold the journal mid-append and require that observe, screen and the registering of an unknown session send no reply until it returns.
 
 ### Live lab under the full lock
 
