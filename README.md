@@ -239,7 +239,8 @@ The HUD and the status command read a cache of the legs the monitor last reporte
 - untrusted content is withheld;
 - a skill is not loaded;
 - a subagent does not spawn;
-- a result whose sensitive leg could not be recorded is withheld.
+- a result or MCP tool description whose sensitive leg could not be recorded is withheld;
+- a file read whose working directory cannot be read is treated as outside the project, so it is screened.
 
 A pre-registration that fails is left for the gate to deny. The shim never holds the conversation up.
 
