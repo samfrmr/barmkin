@@ -307,7 +307,8 @@ async function isFreshSession(ctx: PluginContext, sessionID: string): Promise<bo
 // What the shim tells the monitor about how OpenCode runs its tools. OpenCode
 // 2 has no tool sandbox, so an unsandboxed posture is the default, and the
 // monitor refuses it: only an operator who runs OpenCode inside an OS sandbox
-// whose tools cannot reach the monitor socket sets `sandboxed`.
+// whose tools cannot reach the monitor socket sets `sandboxed`. Nothing here
+// can verify that sandbox; the option is the operator's claim.
 function reportedPosture(): Posture {
   return { sandbox_enabled: pluginOptions.sandboxed === true, allow_all_unix_sockets: false }
 }
