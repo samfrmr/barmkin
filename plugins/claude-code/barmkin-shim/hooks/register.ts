@@ -589,10 +589,11 @@ async function toolDescribeHook($: any, e: any, next: any) {
   if (typeof description !== 'string') return current
 
   const scrubbed = scrubInvisible(description)
-  void taintForScrub($, scrubbed.hiddenCount, 'an MCP tool description').then(
-    (failure) => failure && $.ui.log('barmkin: could not raise the taint for an MCP tool description (' + describeFailure(failure) + ')'),
-    () => $.ui.log('barmkin: could not raise the taint for an MCP tool description'),
-  )
+  const unrecorded = await taintForScrub($, scrubbed.hiddenCount, 'an MCP tool description')
+  if (unrecorded) {
+    $.ui.log('barmkin: withheld an MCP tool description (' + describeFailure(unrecorded) + ')')
+    return { ...current, description: failureText('this tool description', unrecorded) + ' It hid invisible characters.' }
+  }
 
   const { description: cleaned, flagged } = neutralizeDescription(scrubbed.text)
   if (!flagged) {
@@ -702,13 +703,7 @@ async function readTaintHook($: any, e: any, next: any) {
   if (!result || result.deny || result.isError) return result
   if (typeof e.file_path !== 'string') return result
 
-  let cwd = ''
-  try {
-    cwd = await $.session.cwd()
-  } catch {
-    return result
-  }
-  if (!isOutsideCwd(e.file_path, cwd)) return result
+  if (!(await screenedSurface($, e))) return result
 
   const text = extractResultText(result)
   if (!text) return result
