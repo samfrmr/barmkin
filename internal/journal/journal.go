@@ -171,6 +171,11 @@ func (r Record) Valid() bool {
 	return false
 }
 
+// ErrUnreadable marks a Load failure of a safe journal (a private regular
+// file of this uid) whose contents could not be read or are too large. It is
+// never returned for a symlink, a non-regular file or an unsafe file.
+var ErrUnreadable = errors.New("journal unreadable")
+
 // Load reads and checks the journal at path. See the package doc for what
 // it reports. It fails, rather than report anything, when the file cannot
 // be read or is not a private regular file of this uid.
@@ -188,10 +193,10 @@ func Load(path string) (Result, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(f, MaxBytes+1))
 	if err != nil {
-		return Result{}, fmt.Errorf("read journal: %w", err)
+		return Result{}, fmt.Errorf("read journal: %w: %w", ErrUnreadable, err)
 	}
 	if len(data) > MaxBytes {
-		return Result{}, fmt.Errorf("journal %s is larger than %d bytes", path, MaxBytes)
+		return Result{}, fmt.Errorf("journal %s is larger than %d bytes: %w", path, MaxBytes, ErrUnreadable)
 	}
 	return parse(data), nil
 }

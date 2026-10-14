@@ -359,34 +359,57 @@ func TestDamagedJournalIsSalvaged(t *testing.T) {
 	}
 }
 
-func TestUnreadableJournalIsQuarantined(t *testing.T) {
+func TestOversizedJournalIsQuarantined(t *testing.T) {
+	cfg := deployment(t)
+	path := filepath.Join(cfg.StateDir, "journal")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(journal.MaxBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	serve(t, cfg)
+	if aside, _ := filepath.Glob(path + ".damaged-*"); len(aside) != 1 {
+		t.Errorf("journal not moved aside: %v", aside)
+	}
+	c := newClient(cfg.Socket)
+	if _, code := c.legsAt(t, "s"); code != proto.CodeUnknownSession {
+		t.Errorf("a session after an unreadable journal: %q, want unknown_session", code)
+	}
+	if _, err := journal.Load(path); err != nil {
+		t.Errorf("replacement journal unreadable: %v", err)
+	}
+}
+
+func TestUnsafeJournalIsRefusedUntouched(t *testing.T) {
 	cases := map[string]func(t *testing.T, path string){
-		"shared mode": func(t *testing.T, path string) { os.Chmod(path, 0o640) },
+		"group-readable": func(t *testing.T, path string) {
+			os.WriteFile(path, nil, 0o600)
+			os.Chmod(path, 0o640)
+		},
 		"symlink": func(t *testing.T, path string) {
-			target := path + "-target"
-			os.Rename(path, target)
-			os.Symlink(target, path)
+			os.Symlink(path+"-target", path)
 		},
 	}
-	for name, damage := range cases {
+	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {
 			cfg := deployment(t)
-			r := serve(t, cfg)
-			c := newClient(cfg.Socket)
-			c.must(t, proto.OpRegister, registerBody("s", true))
-			r.shutdown(t)
 			path := filepath.Join(cfg.StateDir, "journal")
-			damage(t, path)
-
-			serve(t, cfg)
-			if aside, _ := filepath.Glob(path + ".damaged-*"); len(aside) != 1 {
-				t.Errorf("journal not moved aside: %v", aside)
+			setup(t, path)
+			before, _ := os.Lstat(path)
+			if m, err := Start(cfg); err == nil {
+				m.Close()
+				t.Fatal("started")
 			}
-			if _, code := c.legsAt(t, "s"); code != proto.CodeUnknownSession {
-				t.Errorf("a session from an unreadable journal: %q, want unknown_session", code)
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() {
+				t.Errorf("journal path was changed: %v", err)
 			}
-			if _, err := journal.Load(path); err != nil {
-				t.Errorf("replacement journal unreadable: %v", err)
+			if aside, _ := filepath.Glob(path + ".damaged-*"); len(aside) != 0 {
+				t.Errorf("unsafe journal moved aside: %v", aside)
 			}
 		})
 	}
