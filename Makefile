@@ -22,7 +22,7 @@ claude-lock-lab:
 	./scripts/claude-lock-lab.sh
 
 shim-test:
-	cd plugins/claude-code && node --test barmkin-shim.test.ts
+	cd plugins/claude-code && claude plugin validate --strict barmkin-shim && claude plugin test barmkin-shim
 
 clean:
 	rm -f barmkin

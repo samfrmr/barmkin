@@ -1,2 +1,3 @@
 barmkin
 *.log
+node_modules/

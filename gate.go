@@ -1,38 +1,44 @@
 // Gate is the managed Claude Code PreToolUse check for shim presence.
 //
 // A managed-settings PreToolUse hook runs `barmkin gate` on every tool
-// call. The barmkin shim plugin, a hooks module, registers the same call
-// with the local monitor (POST /v1/register) as the model's tool_use block
-// is appended to the conversation, before the call starts; the gate asks
-// the monitor whether that registration is live (POST /v1/presence) and
-// allows the call only if it is. So a session whose shim is missing,
-// disabled, or broken cannot run any tool.
+// call. The barmkin shim plugin, a hooks module, pre-registers the same
+// call with the barmkin monitor (`barmkin monitor`, the internal/proto
+// preregister operation) as the model's tool_use block is appended to the
+// conversation, before the call starts; the gate asks the monitor whether
+// that pre-registration is live (the gate operation) and allows the call
+// only if it is. So a session whose shim is missing, disabled, or broken
+// cannot run any tool.
 //
 // Both requests are versioned and content-free: they carry only Claude
 // Code's session_id and tool_use_id, never the tool name or input.
 //
 // The gate exits 0 to allow and 2 to deny. Every failure denies: missing
-// configuration, malformed hook input, an unregistered, expired or already
-// consumed call, a malformed monitor reply, an unreachable monitor, and a
-// gate that runs out of time. Claude Code treats any other exit code, and
-// a hook timeout, as a non-blocking error that lets the call proceed, so
-// the gate never exits with another code and always finishes well before
-// the hook timeout.
+// configuration, malformed hook input, a call that was never
+// pre-registered or whose pre-registration expired or was already used, a
+// session the monitor does not know, a malformed monitor reply or one from
+// another contract version, an unreachable monitor, and a gate that runs
+// out of time. Claude Code treats any other exit code, and a hook timeout,
+// as a non-blocking error that lets the call proceed, so the gate never
+// exits with another code and always finishes well before the hook
+// timeout.
 
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"sync"
 	"time"
 
-	"github.com/Daviey/barmkin/monitor"
+	"github.com/Daviey/barmkin/internal/proto"
 )
 
 // gateTiming bounds every stage of the gate. deadline is the hard limit
@@ -41,9 +47,9 @@ import (
 type gateTiming struct {
 	deadline time.Duration // whole gate, enforced by a backstop exit
 	stdin    time.Duration // reading the hook input
-	wait     time.Duration // waiting for the shim's registration to land
+	wait     time.Duration // waiting for the shim's pre-registration to land
 	request  time.Duration // each monitor request
-	poll     time.Duration // between presence checks while waiting
+	poll     time.Duration // between gate checks while waiting
 }
 
 var gateTimes = gateTiming{
@@ -61,6 +67,37 @@ const gateMaxInput = 64 << 20
 // envMonitorSocket names the monitor socket when -socket is not given.
 const envMonitorSocket = "BARMKIN_MONITOR_SOCKET"
 
+// gateReason is why the gate decided what it did.
+type gateReason string
+
+const (
+	gateAllowed            gateReason = "preregistered"
+	gateUnregistered       gateReason = "unregistered"
+	gateUnknownSession     gateReason = "unknown-session"
+	gateMonitorUnavailable gateReason = "monitor-unavailable"
+	gateVersionMismatch    gateReason = "version-mismatch"
+	gateMalformedRequest   gateReason = "malformed-request"
+	gateMalformedResponse  gateReason = "malformed-response"
+	gateDeadlineExceeded   gateReason = "deadline-exceeded"
+)
+
+// gateVerdict is what the gate decided, as it reports a deny on stderr.
+type gateVerdict struct {
+	Version  int        `json:"version"`
+	Decision string     `json:"decision"`
+	Reason   gateReason `json:"reason"`
+}
+
+func (v gateVerdict) allowed() bool { return v.Decision == "allow" }
+
+func allow() gateVerdict {
+	return gateVerdict{Version: proto.Version, Decision: "allow", Reason: gateAllowed}
+}
+
+func deny(reason gateReason) gateVerdict {
+	return gateVerdict{Version: proto.Version, Decision: "deny", Reason: reason}
+}
+
 // cmdGate runs the gate as a process and exits 0 or 2, never anything
 // else: a panic or an overrun of the deadline also denies.
 func cmdGate(args []string) {
@@ -69,7 +106,7 @@ func cmdGate(args []string) {
 
 	backstop := time.AfterFunc(gateTimes.deadline, func() {
 		once.Do(func() {
-			writeGateDeny(os.Stderr, deny(monitor.ReasonDeadlineExceeded))
+			writeGateDeny(os.Stderr, deny(gateDeadlineExceeded))
 			os.Exit(2)
 		})
 	})
@@ -77,7 +114,7 @@ func cmdGate(args []string) {
 	defer func() {
 		if recover() != nil {
 			once.Do(func() {
-				writeGateDeny(os.Stderr, deny(monitor.ReasonMalformedRequest))
+				writeGateDeny(os.Stderr, deny(gateMalformedRequest))
 				os.Exit(2)
 			})
 		}
@@ -87,54 +124,55 @@ func cmdGate(args []string) {
 }
 
 // runGate checks one Claude Code PreToolUse call and returns 0 (allow) or
-// 2 (deny). On deny it writes the reason and the v1 response to stderr,
-// which Claude Code shows to the model.
+// 2 (deny). On deny it writes the reason and the verdict to stderr, which
+// Claude Code shows to the model.
 func runGate(args []string, stdin io.Reader, stderr io.Writer, getenv func(string) string) int {
 	start := time.Now()
 	ctx, cancel := context.WithDeadline(context.Background(), start.Add(gateTimes.deadline))
 	defer cancel()
 
-	resp := gateDecide(ctx, start, args, stdin, getenv)
-	if resp.Decision == monitor.Allow {
+	verdict := gateDecide(ctx, start, args, stdin, getenv)
+	if verdict.allowed() {
 		return 0
 	}
-	writeGateDeny(stderr, resp)
+	writeGateDeny(stderr, verdict)
 	return 2
 }
 
-func gateDecide(ctx context.Context, start time.Time, args []string, stdin io.Reader, getenv func(string) string) monitor.DecideResponse {
+func gateDecide(ctx context.Context, start time.Time, args []string, stdin io.Reader, getenv func(string) string) gateVerdict {
 	fs := flag.NewFlagSet("gate", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	socket := fs.String("socket", getenv(envMonitorSocket), "monitor Unix socket path")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
-		return deny(monitor.ReasonMalformedRequest)
+		return deny(gateMalformedRequest)
 	}
 	if *socket == "" {
-		return deny(monitor.ReasonMonitorUnavailable)
+		return deny(gateMonitorUnavailable)
 	}
 
 	session, call, err := readGateInput(ctx, stdin)
 	if err != nil {
-		return deny(monitor.ReasonMalformedRequest)
+		return deny(gateMalformedRequest)
 	}
 
-	// The shim registers the call before Claude Code starts it, but its
+	// The shim pre-registers the call before Claude Code starts it, but its
 	// request can still be in flight when the gate starts. Keep asking
-	// while the answer is "unregistered" and the wait lasts; every other
-	// answer is final.
-	client := monitor.NewClient(*socket, gateTimes.request)
+	// while the answer is "not pre-registered" and the wait lasts; every
+	// other answer is final. A "not pre-registered" answer consumes
+	// nothing, so asking again is safe.
+	client := newGateClient(*socket, gateTimes.request)
 	waitUntil := start.Add(gateTimes.wait)
 	for {
-		resp := client.Presence(ctx, session, call)
-		if resp.Decision == monitor.Allow || resp.Reason != monitor.ReasonUnregistered {
-			return resp
+		verdict := client.gate(ctx, session, call)
+		if verdict.Reason != gateUnregistered {
+			return verdict
 		}
 		if time.Now().Add(gateTimes.poll).After(waitUntil) {
-			return resp
+			return verdict
 		}
 		select {
 		case <-ctx.Done():
-			return deny(monitor.ReasonDeadlineExceeded)
+			return deny(gateDeadlineExceeded)
 		case <-time.After(gateTimes.poll):
 		}
 	}
@@ -178,31 +216,120 @@ func readGateInput(ctx context.Context, stdin io.Reader) (session, call string, 
 	if err := json.Unmarshal(data, &in); err != nil {
 		return "", "", err
 	}
-	if !monitor.ValidSession(in.SessionID) || !monitor.ValidCall(in.ToolUseID) {
+	// Encoding the gate request checks both tokens the way the monitor
+	// does, so a malformed one is never sent.
+	if _, err := proto.Encode(gateRequest(in.SessionID, in.ToolUseID)); err != nil {
 		return "", "", errors.New("missing or malformed session_id or tool_use_id")
 	}
 	return in.SessionID, in.ToolUseID, nil
 }
 
-func deny(reason monitor.Reason) monitor.DecideResponse {
-	return monitor.DecideResponse{Version: monitor.Version, Decision: monitor.Deny, Reason: reason}
+func gateRequest(session, call string) *proto.GateRequest {
+	return &proto.GateRequest{Version: proto.Version, Host: proto.HostClaudeCode, Session: session, Call: call}
+}
+
+// gateClient asks the monitor's gate operation over its Unix socket.
+type gateClient struct {
+	http *http.Client
+}
+
+func newGateClient(socket string, timeout time.Duration) gateClient {
+	dialer := &net.Dialer{}
+	return gateClient{http: &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "unix", socket)
+			},
+			DisableKeepAlives: true,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
+}
+
+// gate asks whether call was pre-registered. Only an HTTP 200 carrying a
+// well-formed GateResponse that says so allows; everything else denies.
+func (c gateClient) gate(ctx context.Context, session, call string) gateVerdict {
+	body, err := proto.Encode(gateRequest(session, call))
+	if err != nil {
+		return deny(gateMalformedRequest)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://barmkin"+proto.OpGate.Path(), bytes.NewReader(body))
+	if err != nil {
+		return deny(gateMalformedRequest)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return deny(gateDeadlineExceeded)
+		}
+		return deny(gateMonitorUnavailable)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, proto.MaxBodyBytes+1))
+	if err != nil {
+		return deny(gateMonitorUnavailable)
+	}
+	if resp.StatusCode != http.StatusOK {
+		var e proto.ErrorResponse
+		if err := proto.Decode(data, &e); err != nil {
+			return deny(decodeFailure(err))
+		}
+		if e.Error.HTTPStatus() != resp.StatusCode {
+			return deny(gateMalformedResponse)
+		}
+		return deny(codeReason(e.Error))
+	}
+	var g proto.GateResponse
+	if err := proto.Decode(data, &g); err != nil {
+		return deny(decodeFailure(err))
+	}
+	if !g.Preregistered {
+		return deny(gateUnregistered)
+	}
+	return allow()
+}
+
+// decodeFailure is the reason for a reply that did not decode: another
+// contract version, or a malformed reply.
+func decodeFailure(err error) gateReason {
+	if pe, ok := errors.AsType[*proto.Error](err); ok && pe.Code == proto.CodeVersionMismatch {
+		return gateVersionMismatch
+	}
+	return gateMalformedResponse
+}
+
+// codeReason is the reason for an error code the monitor answered with.
+func codeReason(code proto.Code) gateReason {
+	switch code {
+	case proto.CodeUnknownSession:
+		return gateUnknownSession
+	case proto.CodeVersionMismatch:
+		return gateVersionMismatch
+	case proto.CodeBadRequest:
+		return gateMalformedRequest
+	default:
+		return gateMonitorUnavailable
+	}
 }
 
 // gateHints explains a deny to the model and the person reading along.
-var gateHints = map[monitor.Reason]string{
-	monitor.ReasonUnregistered:       "the barmkin shim plugin did not register this tool call",
-	monitor.ReasonExpired:            "the barmkin shim registration for this tool call expired",
-	monitor.ReasonMonitorUnavailable: "the barmkin monitor is not configured or not reachable",
-	monitor.ReasonMalformedRequest:   "the hook input or gate configuration is malformed",
-	monitor.ReasonMalformedResponse:  "the barmkin monitor sent a malformed reply",
-	monitor.ReasonDeadlineExceeded:   "the barmkin gate ran out of time",
+var gateHints = map[gateReason]string{
+	gateUnregistered:       "the barmkin shim plugin did not pre-register this tool call, or its pre-registration expired or was already used",
+	gateUnknownSession:     "the barmkin monitor does not know this session, so the barmkin shim plugin has not registered it",
+	gateMonitorUnavailable: "the barmkin monitor is not configured, not reachable, or cannot answer safely",
+	gateVersionMismatch:    "the barmkin monitor speaks another contract version; upgrade the gate, shim and monitor together",
+	gateMalformedRequest:   "the hook input or gate configuration is malformed",
+	gateMalformedResponse:  "the barmkin monitor sent a malformed reply",
+	gateDeadlineExceeded:   "the barmkin gate ran out of time",
 }
 
-func writeGateDeny(w io.Writer, resp monitor.DecideResponse) {
-	hint := gateHints[resp.Reason]
+func writeGateDeny(w io.Writer, verdict gateVerdict) {
+	hint := gateHints[verdict.Reason]
 	if hint == "" {
 		hint = "the barmkin monitor denied this tool call"
 	}
-	out, _ := json.Marshal(resp)
+	out, _ := json.Marshal(verdict)
 	fmt.Fprintf(w, "[barmkin] gate denied: %s %s\n", hint, out)
 }

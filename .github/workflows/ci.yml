@@ -26,7 +26,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # go test runs the shim's node:test suite, which needs Node 22.18+.
+      # go test runs node:test suites (the contract fixtures, and the shim's
+      # monitor client against a real monitor), which need Node 22.18+.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -53,6 +54,34 @@ jobs:
 
       - name: go test
         run: go test ./...
+
+  # The Claude Code shim plugin, under the Claude Code release
+  # plugins/claude-code/package.json pins: its manifest and hooks module
+  # through `claude plugin validate --strict`, and its suite through
+  # `claude plugin test`, against an in-memory monitor. No credential and no
+  # network call beyond the npm install.
+  shim:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/claude-code
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Install the pinned Claude Code
+        run: npm ci
+
+      - name: claude plugin validate --strict
+        run: npm run validate
+
+      - name: claude plugin test
+        run: npm test
 
   gitleaks:
     runs-on: ubuntu-latest
