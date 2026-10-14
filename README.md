@@ -4,7 +4,7 @@ Regex guardrail for AI coding agents. Each tool call goes through `barmkin eval`
 
 Runs as a subprocess per invocation. Config is a YAML file of regex rules.
 
-> **Successor fork.** This fork works toward a stateful barmkin successor. The legacy CLI (`barmkin eval`, installed by `install.sh`) is unchanged and works as described below. The [monitor](#monitor-core-barmkin-monitor) and the [Claude Code shim and managed gate](#claude-code-shim-and-managed-gate-demo) are a separate demo for a dedicated VM: `barmkin eval` does not use them, and `install.sh` does not set them up.
+> **Successor fork.** This fork works toward a stateful barmkin successor. The legacy CLI (`barmkin eval`, installed by `install.sh`) is unchanged and works as described below. The [monitor](#monitor-core-barmkin-monitor) and the [Claude Code shim and managed gate](#claude-code-shim-and-managed-gate-demo) are a separate demo for a dedicated VM: `barmkin eval` does not use them, and `install.sh` does not set them up. [`packaging/`](#packaging-the-managed-monitor-and-claude-code-seat) installs them.
 
 ## Scope
 
@@ -132,7 +132,7 @@ barmkin monitor [-socket /run/barmkin/monitor.sock] [-state-dir /var/lib/barmkin
                 [-client-group barmkin-clients] [-preregister-ttl 10s]
 ```
 
-**Deployment.** Root installs and manages the monitor, which runs as a dedicated service user, for example under a systemd unit with `User=`, `StateDirectory=` and `RuntimeDirectory=`. Root creates both directories. The monitor refuses to start when:
+**Deployment.** Root installs and manages the monitor, which runs as a dedicated service user under a systemd unit with `User=`, `StateDirectory=` and `RuntimeDirectory=`. [`packaging/`](#packaging-the-managed-monitor-and-claude-code-seat) ships the unit. Root creates both directories. The monitor refuses to start when:
 - it is running as root;
 - the state directory is not owned by the service user with mode `0700` or tighter;
 - the runtime directory is not owned by the service user with mode `0750` or tighter;
@@ -269,11 +269,11 @@ A panic inside the gate also denies, with exit 2.
 
 The gate talks to the monitor through `internal/client`, a small Go client for the contract. Each request is one HTTP exchange on its own connection, with no connection pool or background work, bounded by a deadline and a byte limit. Every failure is an error the caller treats as a deny. `-monitor-uid` pins the monitor's service user, so a process that took over the socket path is never mistaken for the monitor. The shim cannot pin it (see below).
 
-The gate's own cost is starting the process: the round trip to the monitor is well under a millisecond. Built static (`CGO_ENABLED=0`, as the recipe below installs it) and spawned from Node, as a host spawns a hook, the gate takes about 4 ms at p50 on the lab machine, from spawn to exit; spawning `/bin/true` the same way takes about 1.4 ms. The live lab below measures it and requires p50 under 5 ms.
+The gate's own cost is starting the process: the round trip to the monitor is well under a millisecond. Built static (`CGO_ENABLED=0`, as [`packaging/`](#packaging-the-managed-monitor-and-claude-code-seat) installs it) and spawned from Node, as a host spawns a hook, the gate takes about 4 ms at p50 on the lab machine, from spawn to exit; spawning `/bin/true` the same way takes about 1.4 ms. The live lab below measures it and requires p50 under 5 ms.
 
 Claude Code treats a hook timeout, and any exit code other than 0 or 2, as a non-blocking error and runs the tool anyway. So the gate never exits with any other code, and its 3-second deadline sits well inside the 10-second hook timeout in the recipe. `go test` checks the shipped recipe against the deadline, and checks that it keeps the full lock.
 
-The demo packages nothing and changes no host settings. Under the lock, sandboxed Bash commands cannot open the monitor socket. Any other process in the `barmkin-clients` group still can, so the demo does not stop such a process from forging a pre-registration. The shim cannot pin the monitor's uid, which is a known residual of the TypeScript transport.
+The demo scripts change no host settings; [`packaging/`](#packaging-the-managed-monitor-and-claude-code-seat) installs the shim and the gate. Under the lock, sandboxed Bash commands cannot open the monitor socket. Any other process in the `barmkin-clients` group still can, so the demo does not stop such a process from forging a pre-registration. The shim cannot pin the monitor's uid, which is a known residual of the TypeScript transport.
 
 ### Tests and lab fixture
 
@@ -319,39 +319,82 @@ It checks, under the full lock:
 
 It also runs controls without the lock, sandbox kept. There, the same hooks, mods and plugins do change the command that runs, but the sandbox alone still keeps a command off the monitor socket. Without the sandbox, the monitor refuses the session, so no tool runs at all. A shim written as a plugin PreToolUse command hook gets every call denied, with or without the lock.
 
-### Managed-settings recipe for the dedicated demo VM
+### Packaging the managed monitor and Claude Code seat
 
-These steps are for the dedicated demo VM only. Nothing in this repository applies them.
+`packaging/` installs `barmkin monitor` as a root-managed system service and seats the shim and the gate under the full managed lock. Managed settings are machine-wide and lock every Claude Code user on the machine, so install it on the dedicated demo host.
 
-1. Install the sandbox helpers, the binary and the plugin marketplace:
+| | Debian, Ubuntu: `packaging/install.sh` | NixOS: `packaging/nixos/module.nix` |
+|---|---|---|
+| Service user | system user `barmkin`, primary group `barmkin-clients`, no home, no login shell | the same, with uid `services.barmkin.uid` (default 917) |
+| Monitor unit | `packaging/systemd/barmkin-monitor.service`, as `/etc/systemd/system/barmkin-monitor.service` | the same unit, from the package |
+| Binary | `/usr/local/bin/barmkin`, built static | the package, in the Nix store |
+| Shim marketplace | `/opt/barmkin/plugins/claude-code`, without the tests | the package, in the Nix store |
+| Managed settings | `/etc/claude-code/managed-settings.json`, root's, mode `0644` | the same |
 
-   ```bash
-   sudo apt-get install -y bubblewrap socat
-   CGO_ENABLED=0 go build -o barmkin .     # static: the gate runs on every tool call and starts faster
-   sudo install -m 0755 barmkin /usr/local/bin/
-   sudo mkdir -p /opt/barmkin/plugins && sudo cp -r plugins/claude-code /opt/barmkin/plugins/
-   ```
+**The service.** The unit runs `barmkin monitor` with `User=barmkin` and `Group=barmkin-clients`. systemd, as root, creates the two directories the monitor checks at start:
+- `/run/barmkin` (`RuntimeDirectory`, mode `0750`) holds the socket `monitor.sock`, mode `0660`, group `barmkin-clients`;
+- `/var/lib/barmkin` (`StateDirectory`, mode `0700`) holds the journal, mode `0600`.
 
-2. Run the monitor as its own service user, in the deployment [`barmkin monitor`](#monitor-core-barmkin-monitor) requires. The demo user joins the client group:
+`Restart=always` brings the monitor back a second after a crash or a `kill -9`. It replays its journal, and every known lineage comes back tainted by `monitor_restart`. The unit also drops every capability, keeps the file system read-only apart from those two directories, allows only Unix sockets and filters system calls. `systemd-analyze security` rates it 1.1. The Jev screen, once wired in, will also need `AF_INET` and `AF_INET6`.
 
-   ```bash
-   sudo groupadd --system barmkin-clients
-   sudo useradd --system --no-create-home --gid barmkin-clients barmkin
-   sudo usermod -aG barmkin-clients "$USER"     # log in again to take the group
-   sudo install -d -o barmkin -g barmkin-clients -m 0750 /run/barmkin
-   sudo install -d -o barmkin -g barmkin-clients -m 0700 /var/lib/barmkin
-   sudo -u barmkin /usr/local/bin/barmkin monitor
-   ```
+**The managed settings** are the [recipe](#the-managed-settings-recipe) with one change: the gate is pinned to the `barmkin` user's uid (`-monitor-uid`), so a process that takes over the socket path is denied with `monitor-uid-mismatch`. On NixOS the gate, the marketplace, `bwrapPath` and `socatPath` also point into the Nix store.
 
-3. Install [`plugins/claude-code/managed-settings.example.json`](plugins/claude-code/managed-settings.example.json) as `/etc/claude-code/managed-settings.json` (owned by root, mode `0644`). It sets up the full lock:
-   - `allowManagedHooksOnly: true`: only managed hooks and managed plugins' hooks modules run. User, project, local and `--settings` hooks, `--plugin-dir` mods and user-installed plugins are not loaded. This also switches off any other settings hooks on the VM.
-   - `prependPlugins`: seats `barmkin-shim@barmkin-local` and then `cc-plugin-sec-default@builtin`. Keep the security default listed, by that exact id: leaving it out unseats it.
-   - `extraKnownMarketplaces` and `enabledPlugins`: declare the local `barmkin-local` marketplace at `/opt/barmkin/plugins/claude-code` and turn on `barmkin-shim@barmkin-local`, which makes the shim a managed plugin.
-   - `sandbox`: `enabled`, `failIfUnavailable` and `allowUnsandboxedCommands: false`, with `bwrapPath` and `socatPath` pinned to `/usr/bin` (only managed settings can set these). Sandboxed commands cannot open the monitor socket. Never set `network.allowAllUnixSockets`: the shim reports it, and the monitor refuses the session.
-   - `hooks.PreToolUse`: the gate with matcher `*`, `-socket /run/barmkin/monitor.sock`, and `timeout: 10` (seconds). To pin the monitor's service user, append `-monitor-uid` with the number `id -u barmkin` prints.
-   - `env.BARMKIN_MONITOR_SOCKET`: tells the shim where the monitor is.
+**Debian and Ubuntu:**
 
-4. Start `claude` as the demo user and confirm that tool calls run. `/barmkin-status` shows the legs and the monitor's state. To see the deny path, stop the monitor, or set `enabledPlugins."barmkin-shim@barmkin-local"` to `false` in the managed settings. Every tool call is then denied with the reason from the gate. Turning the shim off in user settings does not work: the managed setting wins.
+```bash
+sudo apt-get install -y bubblewrap socat     # the sandbox helpers the recipe pins in /usr/bin
+CGO_ENABLED=0 go build -o barmkin .          # static: the gate runs on every tool call and starts faster
+sudo packaging/install.sh install --client "$USER"     # log in again to take the group
+sudo packaging/install.sh uninstall
+```
+
+`make managed-install` and `make managed-uninstall` do the same, without `--client`.
+- `install` needs root, systemd, and `/usr/bin/bwrap` and `/usr/bin/socat`. Run it again and it changes nothing already in place. A new binary or unit restarts the monitor with a clean stop, so no session is tainted.
+- `install` refuses to replace a `/etc/claude-code/managed-settings.json` it did not write: barmkin's managed settings replace the whole file.
+- `uninstall` stops and removes the service, the state and runtime directories, the binary, the marketplace, the user and the group. It removes the managed settings only if `install` wrote them. Run it again and it does nothing.
+
+**NixOS:**
+
+```nix
+imports = [ /path/to/barmkin/packaging/nixos/module.nix ];
+services.barmkin = { enable = true; clients = [ "alice" ]; };
+```
+
+Switching to a configuration without it uninstalls everything but `/var/lib/barmkin`, which NixOS keeps like any `StateDirectory`.
+
+**Tests:**
+
+```bash
+packaging/test/ubuntu.sh             # or: make packaging-test-ubuntu   (Ubuntu 24.04 and 22.04; needs docker and go)
+nix-build packaging/nixos/test.nix   # or: make packaging-test-nixos    (a NixOS VM; needs KVM)
+```
+
+The Ubuntu test boots each release with systemd in a privileged container, from the stock image plus systemd, curl, bubblewrap and socat. The NixOS test boots a VM. Both run `packaging/test/checks.sh` as root on the installed machine. It runs the gate command from the installed managed settings as a member of `barmkin-clients`, and checks:
+- the deployment: the monitor runs as `barmkin`; the socket is `barmkin:barmkin-clients` `0660` and the journal `0600`, in directories `0750` and `0700`; the managed settings are root's, mode `0644`, keep the lock and pin the gate to the `barmkin` uid;
+- socket access: a member of `barmkin-clients` reaches the monitor, and another user cannot connect;
+- the gate: a call the shim pre-registered is allowed, and one it did not, or a replay, is denied;
+- posture refusal: a session that is unsandboxed or allows every Unix socket is refused (`posture_refused`), and its calls are denied;
+- deployment refusal: the monitor will not run as root, with a state directory others can read, with a runtime directory its group can write, or on state another monitor holds;
+- protocol-version mismatch:
+  - the monitor answers a version 2 request with `version_mismatch`;
+  - the gate denies a version 2 monitor with `version-mismatch`;
+  - the installed shim's own client reports that the shim and the monitor must be upgraded together. This check needs Node 22.18+, so only the NixOS test runs it;
+- the uid pin: the gate denies a socket served by another uid (`monitor-uid-mismatch`);
+- recovery: after a `kill -9`, systemd restarts the monitor, the session comes back tainted by `monitor_restart`, and pre-registered calls are allowed again.
+
+Each test then installs again and checks that nothing changed, the running monitor included. It uninstalls twice, checks that nothing is left, and installs once more. The Ubuntu test also checks that `install` refuses managed settings it did not write and `uninstall` leaves them in place. CI runs the Ubuntu 24.04 test.
+
+#### The managed-settings recipe
+
+[`plugins/claude-code/managed-settings.example.json`](plugins/claude-code/managed-settings.example.json) is the recipe the installers write as `/etc/claude-code/managed-settings.json`. It sets up the full lock:
+- `allowManagedHooksOnly: true`: only managed hooks and managed plugins' hooks modules run. User, project, local and `--settings` hooks, `--plugin-dir` mods and user-installed plugins are not loaded. This also switches off any other settings hooks on the VM.
+- `prependPlugins`: seats `barmkin-shim@barmkin-local` and then `cc-plugin-sec-default@builtin`. Keep the security default listed, by that exact id: leaving it out unseats it.
+- `extraKnownMarketplaces` and `enabledPlugins`: declare the local `barmkin-local` marketplace at `/opt/barmkin/plugins/claude-code` and turn on `barmkin-shim@barmkin-local`, which makes the shim a managed plugin.
+- `sandbox`: `enabled`, `failIfUnavailable` and `allowUnsandboxedCommands: false`, with `bwrapPath` and `socatPath` pinned to `/usr/bin` (only managed settings can set these). Sandboxed commands cannot open the monitor socket. Never set `network.allowAllUnixSockets`: the shim reports it, and the monitor refuses the session.
+- `hooks.PreToolUse`: the gate with matcher `*`, `-socket /run/barmkin/monitor.sock`, and `timeout: 10` (seconds). The installers append `-monitor-uid` with the `barmkin` user's uid.
+- `env.BARMKIN_MONITOR_SOCKET`: tells the shim where the monitor is.
+
+Start `claude` as a member of `barmkin-clients` and confirm that tool calls run. `/barmkin-status` shows the legs and the monitor's state. To see the deny path, stop the monitor, or set `enabledPlugins."barmkin-shim@barmkin-local"` to `false` in the managed settings. Every tool call is then denied with the reason from the gate. Turning the shim off in user settings does not work: the managed setting wins.
 
 The lock holds against the demo user's own settings, mods and plugins. It does not hold against root, who can rewrite the managed settings.
 

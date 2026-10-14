@@ -83,6 +83,23 @@ jobs:
       - name: claude plugin test
         run: npm test
 
+  # packaging/install.sh on a clean Ubuntu 24.04, booted with systemd in a
+  # privileged container: install, the checks in packaging/test/checks.sh,
+  # a second install that changes nothing, and uninstall twice.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: packaging/test/ubuntu.sh
+        run: packaging/test/ubuntu.sh 24.04
+
   gitleaks:
     runs-on: ubuntu-latest
     env:
