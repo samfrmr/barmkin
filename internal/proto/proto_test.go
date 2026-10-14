@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -175,4 +177,23 @@ func TestTypeScriptFixtures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TypeScript fixture tests failed: %v", err)
 	}
+}
+
+// tokenGrammar is the token shape ValidToken checks, as a regexp.
+var tokenGrammar = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+// FuzzValidToken holds ValidToken to the token grammar.
+func FuzzValidToken(f *testing.F) {
+	for _, s := range []string{
+		"", "a", "sess-a", "toolu_01A", "a.b_c-D9", "a b", "a\n", "\na", "é", "a/b", "a\x00",
+		strings.Repeat("a", 127), strings.Repeat("a", 128), strings.Repeat("a", 129),
+		strings.Repeat("é", 64), "-", ".", "_", "A~", "[", "`", "{", "@", ":",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if got, want := ValidToken(s), tokenGrammar.MatchString(s); got != want {
+			t.Fatalf("ValidToken(%q) = %v, the grammar says %v", s, got, want)
+		}
+	})
 }

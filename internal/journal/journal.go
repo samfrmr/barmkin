@@ -63,7 +63,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"sync"
@@ -128,9 +127,6 @@ type Journal struct {
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
-// tokenPattern matches internal/proto's opaque session token shape.
-var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
-
 // untrustedSources and sensitiveSources are the sources each leg can hold.
 var (
 	untrustedSources = []proto.Source{
@@ -162,10 +158,10 @@ func (r Record) Valid() bool {
 	case KindStart, KindShutdown:
 		return r == Record{V: r.V, Seq: r.Seq, Kind: r.Kind}
 	case KindRegister:
-		return validHost(r.Host) && tokenPattern.MatchString(r.Session) &&
-			tokenPattern.MatchString(r.Root) && r.Leg == "" && r.Source == ""
+		return validHost(r.Host) && proto.ValidToken(r.Session) &&
+			proto.ValidToken(r.Root) && r.Leg == "" && r.Source == ""
 	case KindRaise:
-		return validHost(r.Host) && r.Session == "" && tokenPattern.MatchString(r.Root) &&
+		return validHost(r.Host) && r.Session == "" && proto.ValidToken(r.Root) &&
 			SourceFits(r.Leg, r.Source)
 	}
 	return false

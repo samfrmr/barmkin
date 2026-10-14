@@ -209,7 +209,7 @@ A demo of the successor's guard for a managed Claude Code seat, under the full m
 - **Shim plugin** (`plugins/claude-code/barmkin-shim`). A hooks module (`hooks/register.ts`) ported from barmkin-mod's. The monitor holds the session's taint; the shim keeps everything that needs content, and sends the monitor only ids, closed values and, for a screen, redacted text windows.
 - **Managed gate** (`barmkin gate`). A PreToolUse hook in managed settings, so the user cannot remove it. It asks the monitor whether the shim pre-registered that exact call (`/v1/gate`) and exits 0 only if it did.
 
-A session without the shim, or with a broken one, can therefore run no tools.
+A session without the shim, or with a broken one, can therefore run no tools: the deny says `barmkin shim not present`.
 
 ### What the shim does
 
@@ -250,19 +250,26 @@ The shim has to be a hooks module. Claude Code 2.1.x runs the managed PreToolUse
 
 ### What the gate does
 
+The gate is the successor's strict presence gate. It allows a call only when the monitor knows the session (the shim registered it) and the shim pre-registered that very call, so the shim is live and makes the call's guard decision. It checks every tool, not only the egress-capable ones (Bash, PowerShell, Monitor, WebFetch, WebSearch and MCP tools). It reads only `session_id` and `tool_use_id` from the hook input, and sends only those to the monitor.
+
 The shim's pre-registration normally lands before the gate starts, but its request can still be in flight. So the gate keeps asking for up to 1.5 seconds while the answer is `unregistered`. Every other answer is final. A pre-registration admits one gate check and lives for the monitor's `-preregister-ttl` (10 seconds by default).
 
 The gate exits 2, writing its reason and verdict to stderr, for any of these:
 
-- `unregistered`: no live pre-registration for the call. It was never made, has expired, or was already used.
-- `unknown-session`: the monitor does not know the session, because the shim never registered it or the monitor refused its posture.
+- `unregistered`: no live pre-registration for the call. It was never made, has expired, or was already used. The deny says `barmkin shim not present`.
+- `unknown-session`: the monitor does not know the session, because the shim never registered it or the monitor refused its posture. The deny says `barmkin shim not present`.
 - `malformed-request`: the hook input has no well-formed `session_id` or `tool_use_id`, is not JSON, is over 64 MiB, or does not arrive within 1 second. A bad gate flag also gives this reason.
 - `malformed-response`: a reply other than a well-formed `GateResponse` with HTTP 200, or an error whose status does not match its code.
 - `version-mismatch`: the monitor speaks another contract version.
 - `monitor-unavailable`: no socket is configured (`-socket`, or `BARMKIN_MONITOR_SOCKET`), or the monitor is unreachable, answers `unavailable`, or stalls past the 500 ms request timeout.
+- `monitor-uid-mismatch`: with `-monitor-uid UID`, the process serving the socket does not run as that uid, going by the kernel's peer credentials (`SO_PEERCRED`). A `-monitor-uid` that is not a number gives `malformed-request`.
 - `deadline-exceeded`: the gate hits its 3-second hard deadline.
 
 A panic inside the gate also denies, with exit 2.
+
+The gate talks to the monitor through `internal/client`, a small Go client for the contract. Each request is one HTTP exchange on its own connection, with no connection pool or background work, bounded by a deadline and a byte limit. Every failure is an error the caller treats as a deny. `-monitor-uid` pins the monitor's service user, so a process that took over the socket path is never mistaken for the monitor. The shim cannot pin it (see below).
+
+The gate's own cost is starting the process: the round trip to the monitor is well under a millisecond. Built static (`CGO_ENABLED=0`, as the recipe below installs it) and spawned from Node, as a host spawns a hook, the gate takes about 4 ms at p50 on the lab machine, from spawn to exit; spawning `/bin/true` the same way takes about 1.4 ms. The live lab below measures it and requires p50 under 5 ms.
 
 Claude Code treats a hook timeout, and any exit code other than 0 or 2, as a non-blocking error and runs the tool anyway. So the gate never exits with any other code, and its 3-second deadline sits well inside the 10-second hook timeout in the recipe. `go test` checks the shipped recipe against the deadline, and checks that it keeps the full lock.
 
@@ -296,7 +303,7 @@ The script builds `barmkin` into a temporary directory and starts `barmkin monit
 ./scripts/claude-lock-lab.sh     # or: make claude-lock-lab, or BARMKIN_CLAUDE_LAB=1 go test -run TestClaudeLockLab .
 ```
 
-The script runs about thirty real `claude -p` sessions (Claude Code 2.1.x) against a scripted local model. Each runs in a private mount namespace (bubblewrap) where the recipe's paths exist: the recipe itself at `/etc/claude-code/managed-settings.json`, unchanged, plus `/usr/local/bin/barmkin`, `/opt/barmkin/plugins/claude-code` and `/run/barmkin/monitor.sock`. It writes nothing outside a temporary directory. It needs `claude`, `go`, `node`, `bwrap`, `socat`, `curl`, unprivileged user namespaces and an existing `/etc/claude-code` directory to mount over. If any is missing it exits 77.
+The script runs about forty real `claude -p` sessions (Claude Code 2.1.x) against a scripted local model. Each runs in a private mount namespace (bubblewrap) where the recipe's paths exist: the recipe itself at `/etc/claude-code/managed-settings.json`, unchanged, plus `/usr/local/bin/barmkin`, `/opt/barmkin/plugins/claude-code` and `/run/barmkin/monitor.sock`. It writes nothing outside a temporary directory. It needs `claude`, `go`, `node`, `bwrap`, `socat`, `curl`, unprivileged user namespaces and an existing `/etc/claude-code` directory to mount over. If any is missing it exits 77.
 
 It checks, under the full lock:
 
@@ -305,7 +312,10 @@ It checks, under the full lock:
 - None of these changes the command that runs: user, project, local and `--settings` PreToolUse hooks that rewrite it; a `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS` mod, or a user-installed plugin, that rewrites it and overturns the gate's re-check at `tool.check`; user settings that redefine the `barmkin-local` marketplace or disable the shim. The user hooks and mods are never loaded.
 - A sandboxed command cannot reach the monitor socket to forge a pre-registration.
 - A plugin-state file that points the shim at a user-writable copy, and `--safe-mode`, stop the shim loading, so every call is denied.
-- With the monitor down, every call is denied, including under `disableAllHooks`, `bypassPermissions` and `--bare`.
+- A shim that is not installed, turned off in the managed settings, or whose hooks module fails to load is not present: every call is denied with `unknown-session`, Read and WebFetch as well as Bash, and the deny says `barmkin shim not present`. The same holds under `--safe-mode`.
+- A gate pinned to the monitor's uid (`-monitor-uid`) allows calls, and one pinned to another uid denies them with `monitor-uid-mismatch`.
+- With the monitor down, every call is denied (Read and WebFetch as well as Bash), including under `disableAllHooks`, `bypassPermissions` and `--bare`. A monitor that accepts connections but never answers is denied with `monitor-unavailable`, and one that speaks another contract version with `version-mismatch`.
+- The gate process, spawned from Node 300 times against the lab's monitor, has p50 under 5 ms (`BARMKIN_LAB_GATE_P50_MS` changes the bound).
 
 It also runs controls without the lock, sandbox kept. There, the same hooks, mods and plugins do change the command that runs, but the sandbox alone still keeps a command off the monitor socket. Without the sandbox, the monitor refuses the session, so no tool runs at all. A shim written as a plugin PreToolUse command hook gets every call denied, with or without the lock.
 
@@ -317,7 +327,7 @@ These steps are for the dedicated demo VM only. Nothing in this repository appli
 
    ```bash
    sudo apt-get install -y bubblewrap socat
-   go build -o barmkin .
+   CGO_ENABLED=0 go build -o barmkin .     # static: the gate runs on every tool call and starts faster
    sudo install -m 0755 barmkin /usr/local/bin/
    sudo mkdir -p /opt/barmkin/plugins && sudo cp -r plugins/claude-code /opt/barmkin/plugins/
    ```
@@ -338,7 +348,7 @@ These steps are for the dedicated demo VM only. Nothing in this repository appli
    - `prependPlugins`: seats `barmkin-shim@barmkin-local` and then `cc-plugin-sec-default@builtin`. Keep the security default listed, by that exact id: leaving it out unseats it.
    - `extraKnownMarketplaces` and `enabledPlugins`: declare the local `barmkin-local` marketplace at `/opt/barmkin/plugins/claude-code` and turn on `barmkin-shim@barmkin-local`, which makes the shim a managed plugin.
    - `sandbox`: `enabled`, `failIfUnavailable` and `allowUnsandboxedCommands: false`, with `bwrapPath` and `socatPath` pinned to `/usr/bin` (only managed settings can set these). Sandboxed commands cannot open the monitor socket. Never set `network.allowAllUnixSockets`: the shim reports it, and the monitor refuses the session.
-   - `hooks.PreToolUse`: the gate with matcher `*`, `-socket /run/barmkin/monitor.sock`, and `timeout: 10` (seconds).
+   - `hooks.PreToolUse`: the gate with matcher `*`, `-socket /run/barmkin/monitor.sock`, and `timeout: 10` (seconds). To pin the monitor's service user, append `-monitor-uid` with the number `id -u barmkin` prints.
    - `env.BARMKIN_MONITOR_SOCKET`: tells the shim where the monitor is.
 
 4. Start `claude` as the demo user and confirm that tool calls run. `/barmkin-status` shows the legs and the monitor's state. To see the deny path, stop the monitor, or set `enabledPlugins."barmkin-shim@barmkin-local"` to `false` in the managed settings. Every tool call is then denied with the reason from the gate. Turning the shim off in user settings does not work: the managed setting wins.

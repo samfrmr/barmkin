@@ -7,7 +7,7 @@
 // of <scripts-dir>/<name>.cmd (default: `echo ORIGINAL > markers/<name>.txt`),
 // or one Agent call whose prompt is "SCRIPT:<name>-sub" when
 // <scripts-dir>/<name>.agent exists. A line "READ <path>" is a Read call
-// instead, and a line "---" ends one turn's calls: each later turn makes the
+// instead, a line "FETCH <url>" a WebFetch call, and a line "---" ends one turn's calls: each later turn makes the
 // next group's calls. Once every group has run it ends the turn quoting the
 // tool results. Each request is logged as a JSON line. Nothing here reaches
 // the network.
@@ -48,7 +48,9 @@ function plan(body) {
     uses: lines.map((line) =>
       line.startsWith("READ ")
         ? { id: id(), name: "Read", input: { file_path: line.slice(5) } }
-        : { id: id(), name: "Bash", input: { command: line, description: "lab probe" } },
+        : line.startsWith("FETCH ")
+          ? { id: id(), name: "WebFetch", input: { url: line.slice(6), prompt: "lab probe" } }
+          : { id: id(), name: "Bash", input: { command: line, description: "lab probe" } },
     ),
   }
 }
