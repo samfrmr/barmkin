@@ -1,0 +1,45 @@
+{
+  "op": "gate",
+  "valid": [
+    {
+      "name": "managed gate asks about a call",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "call": "toolu_01ABCdef"}
+    },
+    {
+      "name": "pre-registered",
+      "message": "response",
+      "body": {"version": 1, "preregistered": true}
+    },
+    {
+      "name": "not pre-registered",
+      "message": "response",
+      "body": {"version": 1, "preregistered": false}
+    },
+    {
+      "name": "monitor cannot answer",
+      "message": "error",
+      "body": {"version": 1, "error": "unavailable"}
+    }
+  ],
+  "invalid": [
+    {
+      "name": "string boolean",
+      "message": "response",
+      "body": {"version": 1, "preregistered": "true"},
+      "error": "bad_request"
+    },
+    {
+      "name": "null boolean",
+      "message": "response",
+      "body": {"version": 1, "preregistered": null},
+      "error": "bad_request"
+    },
+    {
+      "name": "an allow field is not part of the answer",
+      "message": "response",
+      "body": {"version": 1, "preregistered": false, "allow": true},
+      "error": "bad_request"
+    }
+  ]
+}

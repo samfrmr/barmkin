@@ -1,0 +1,64 @@
+{
+  "op": "status",
+  "valid": [
+    {
+      "name": "read a session",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a"}
+    },
+    {
+      "name": "tainted session, classifier degraded",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "invisible", "sensitive": "none"}, "classifier": "degraded"}
+    },
+    {
+      "name": "clean session",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "none", "sensitive": "none"}, "classifier": "ok"}
+    }
+  ],
+  "invalid": [
+    {
+      "name": "trailing data",
+      "message": "request",
+      "raw": "{\"version\":1,\"host\":\"claude_code\",\"session\":\"sess-a\"}{}",
+      "error": "bad_request"
+    },
+    {
+      "name": "truncated",
+      "message": "request",
+      "raw": "{\"version\":1,\"host\":\"claude_code\",",
+      "error": "bad_request"
+    },
+    {
+      "name": "empty body",
+      "message": "request",
+      "raw": "",
+      "error": "bad_request"
+    },
+    {
+      "name": "array",
+      "message": "request",
+      "raw": "[1]",
+      "error": "bad_request"
+    },
+    {
+      "name": "null",
+      "message": "request",
+      "raw": "null",
+      "error": "bad_request"
+    },
+    {
+      "name": "acknowledgement is not part of sticky taint",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "fetch", "sensitive": "none"}, "classifier": "ok", "ack_required": true},
+      "error": "bad_request"
+    },
+    {
+      "name": "no epoch",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "none", "sensitive": "none"}, "classifier": "ok", "epoch": "e1"},
+      "error": "bad_request"
+    }
+  ]
+}

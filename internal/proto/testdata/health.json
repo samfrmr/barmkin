@@ -1,0 +1,86 @@
+{
+  "op": "health",
+  "valid": [
+    {
+      "name": "ask",
+      "message": "request",
+      "body": {"version": 1}
+    },
+    {
+      "name": "ok",
+      "message": "response",
+      "body": {"version": 1, "state": "ok"}
+    },
+    {
+      "name": "degraded",
+      "message": "response",
+      "body": {"version": 1, "state": "degraded"}
+    },
+    {
+      "name": "bad request",
+      "message": "error",
+      "body": {"version": 1, "error": "bad_request"}
+    },
+    {
+      "name": "version mismatch",
+      "message": "error",
+      "body": {"version": 1, "error": "version_mismatch"}
+    }
+  ],
+  "invalid": [
+    {
+      "name": "missing version",
+      "message": "request",
+      "body": {},
+      "error": "bad_request"
+    },
+    {
+      "name": "null version",
+      "message": "request",
+      "body": {"version": null},
+      "error": "bad_request"
+    },
+    {
+      "name": "string version",
+      "message": "request",
+      "body": {"version": "1"},
+      "error": "bad_request"
+    },
+    {
+      "name": "fractional version",
+      "message": "request",
+      "body": {"version": 1.5},
+      "error": "bad_request"
+    },
+    {
+      "name": "future version",
+      "message": "request",
+      "body": {"version": 2},
+      "error": "version_mismatch"
+    },
+    {
+      "name": "response from a newer monitor",
+      "message": "response",
+      "body": {"version": 2, "state": "ok", "uptime_s": 5},
+      "error": "version_mismatch"
+    },
+    {
+      "name": "error from a newer monitor",
+      "message": "error",
+      "body": {"version": 2, "error": "version_mismatch"},
+      "error": "version_mismatch"
+    },
+    {
+      "name": "error with free text",
+      "message": "error",
+      "body": {"version": 1, "error": "unavailable", "detail": "journal write failed"},
+      "error": "bad_request"
+    },
+    {
+      "name": "unknown state",
+      "message": "response",
+      "body": {"version": 1, "state": "starting"},
+      "error": "bad_request"
+    }
+  ]
+}

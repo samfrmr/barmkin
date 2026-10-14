@@ -1,0 +1,8 @@
+{
+  "name": "barmkin-shims-common",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test proto.test.ts"
+  }
+}
