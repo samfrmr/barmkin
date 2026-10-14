@@ -1,0 +1,97 @@
+{
+  "op": "register",
+  "valid": [
+    {
+      "name": "fresh top-level Claude Code session",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "root": "sess-a", "fresh": true, "posture": {"sandbox_enabled": true, "allow_all_unix_sockets": false}}
+    },
+    {
+      "name": "resumed OpenCode child session",
+      "message": "request",
+      "body": {"version": 1, "host": "opencode", "session": "ses_child.2", "root": "ses_root", "fresh": false, "posture": {"sandbox_enabled": false, "allow_all_unix_sockets": true}}
+    },
+    {
+      "name": "clean session",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "none", "sensitive": "none"}}
+    },
+    {
+      "name": "session the monitor does not know is not fresh",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "unknown_session", "sensitive": "none"}}
+    },
+    {
+      "name": "re-register keeps both legs",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "monitor_restart", "sensitive": "credential"}}
+    },
+    {
+      "name": "posture refused",
+      "message": "error",
+      "body": {"version": 1, "error": "posture_refused"}
+    }
+  ],
+  "invalid": [
+    {
+      "name": "no clear capability field",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "root": "sess-a", "fresh": true, "posture": {"sandbox_enabled": true, "allow_all_unix_sockets": false}, "capability": "c2VjcmV0"},
+      "error": "bad_request"
+    },
+    {
+      "name": "newer shim with an extra field is a version mismatch",
+      "message": "request",
+      "body": {"version": 2, "host": "claude_code", "session": "sess-a", "root": "sess-a", "fresh": true, "posture": {"sandbox_enabled": true, "allow_all_unix_sockets": false}, "capability": "c2VjcmV0"},
+      "error": "version_mismatch"
+    },
+    {
+      "name": "older shim",
+      "message": "request",
+      "body": {"version": 0, "host": "claude_code", "session": "sess-a", "root": "sess-a", "fresh": true, "posture": {"sandbox_enabled": true, "allow_all_unix_sockets": false}},
+      "error": "version_mismatch"
+    },
+    {
+      "name": "unknown posture field",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "root": "sess-a", "fresh": true, "posture": {"sandbox_enabled": true, "allow_all_unix_sockets": false, "bypass": true}},
+      "error": "bad_request"
+    },
+    {
+      "name": "missing posture field",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "root": "sess-a", "fresh": true, "posture": {"sandbox_enabled": true}},
+      "error": "bad_request"
+    },
+    {
+      "name": "deferred host",
+      "message": "request",
+      "body": {"version": 1, "host": "copilot", "session": "sess-a", "root": "sess-a", "fresh": true, "posture": {"sandbox_enabled": true, "allow_all_unix_sockets": false}},
+      "error": "bad_request"
+    },
+    {
+      "name": "session token with content",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "rm -rf /", "root": "sess-a", "fresh": true, "posture": {"sandbox_enabled": true, "allow_all_unix_sockets": false}},
+      "error": "bad_request"
+    },
+    {
+      "name": "sensitive leg holds an untrusted source",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "none", "sensitive": "fetch"}},
+      "error": "bad_request"
+    },
+    {
+      "name": "untrusted leg holds the credential source",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "credential", "sensitive": "none"}},
+      "error": "bad_request"
+    },
+    {
+      "name": "capability_required is not an error code",
+      "message": "error",
+      "body": {"version": 1, "error": "capability_required"},
+      "error": "bad_request"
+    }
+  ]
+}

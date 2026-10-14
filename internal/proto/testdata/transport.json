@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "path_prefix": "/v1/",
+  "max_body_bytes": 131072,
+  "client_deadline_ms": 1000,
+  "ops": ["register", "preregister", "gate", "decide", "screen", "observe", "status", "health"],
+  "unknown_paths": [
+    "/v1/rotate",
+    "/v1/clear",
+    "/v1/clear_taint",
+    "/v1/capability",
+    "/v1/ack",
+    "/v1/end",
+    "/v2/register",
+    "/v1/register/",
+    "/v1/Register",
+    "/register",
+    "/v1/",
+    "/v1"
+  ],
+  "codes": {
+    "bad_request": 400,
+    "version_mismatch": 400,
+    "unknown_session": 404,
+    "posture_refused": 403,
+    "unavailable": 503
+  }
+}

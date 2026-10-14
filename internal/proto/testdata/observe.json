@@ -1,0 +1,63 @@
+{
+  "op": "observe",
+  "valid": [
+    {
+      "name": "credential path touched",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "source": "credential"}
+    },
+    {
+      "name": "skill loaded",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "source": "skill"}
+    },
+    {
+      "name": "legs after the observation",
+      "message": "response",
+      "body": {"version": 1, "legs": {"untrusted": "skill", "sensitive": "credential"}}
+    },
+    {
+      "name": "session not registered",
+      "message": "error",
+      "body": {"version": 1, "error": "unknown_session"}
+    }
+  ],
+  "invalid": [
+    {
+      "name": "none cannot lower a leg",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "source": "none"},
+      "error": "bad_request"
+    },
+    {
+      "name": "only the monitor sets monitor_restart",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "source": "monitor_restart"},
+      "error": "bad_request"
+    },
+    {
+      "name": "no clear field",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "source": "fetch", "clear": true},
+      "error": "bad_request"
+    },
+    {
+      "name": "case-variant key",
+      "message": "request",
+      "body": {"version": 1, "Host": "claude_code", "session": "sess-a", "source": "fetch"},
+      "error": "bad_request"
+    },
+    {
+      "name": "repeated key",
+      "message": "request",
+      "raw": "{\"version\":1,\"host\":\"claude_code\",\"session\":\"sess-a\",\"source\":\"fetch\",\"source\":\"credential\"}",
+      "error": "bad_request"
+    },
+    {
+      "name": "repeated nested key",
+      "message": "response",
+      "raw": "{\"version\":1,\"legs\":{\"untrusted\":\"fetch\",\"sensitive\":\"none\",\"untrusted\":\"none\"}}",
+      "error": "bad_request"
+    }
+  ]
+}

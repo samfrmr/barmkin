@@ -1,0 +1,46 @@
+{
+  "op": "preregister",
+  "valid": [
+    {
+      "name": "Claude Code tool_use_id",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "call": "toolu_01ABCdef"}
+    },
+    {
+      "name": "accepted",
+      "message": "response",
+      "body": {"version": 1, "ttl_ms": 10000}
+    },
+    {
+      "name": "session not registered",
+      "message": "error",
+      "body": {"version": 1, "error": "unknown_session"}
+    }
+  ],
+  "invalid": [
+    {
+      "name": "tool name is not sent",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "call": "toolu_01ABCdef", "tool": "Bash"},
+      "error": "bad_request"
+    },
+    {
+      "name": "empty call id",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "call": ""},
+      "error": "bad_request"
+    },
+    {
+      "name": "zero lifetime",
+      "message": "response",
+      "body": {"version": 1, "ttl_ms": 0},
+      "error": "bad_request"
+    },
+    {
+      "name": "fractional lifetime",
+      "message": "response",
+      "body": {"version": 1, "ttl_ms": 1.5},
+      "error": "bad_request"
+    }
+  ]
+}

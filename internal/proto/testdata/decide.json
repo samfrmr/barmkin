@@ -1,0 +1,96 @@
+{
+  "op": "decide",
+  "valid": [
+    {
+      "name": "web fetch",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "classes": ["web-fetch"]}
+    },
+    {
+      "name": "call in no egress class",
+      "message": "request",
+      "body": {"version": 1, "host": "opencode", "session": "ses_root", "classes": []}
+    },
+    {
+      "name": "every egress class",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "classes": ["shell-outward", "net-client", "dns", "forge", "publish", "cloud", "interpreter-net", "persist-shell", "destructive", "history-rewrite", "web-fetch", "web-search", "monitor-ws", "mcp-write", "skill-load", "persistence"]}
+    },
+    {
+      "name": "pass",
+      "message": "response",
+      "body": {"version": 1, "verdict": "pass", "rule": "none", "classes": [], "legs": {"untrusted": "none", "sensitive": "none"}}
+    },
+    {
+      "name": "warn on a destructive call in a clean session",
+      "message": "response",
+      "body": {"version": 1, "verdict": "warn", "rule": "none", "classes": ["destructive"], "legs": {"untrusted": "none", "sensitive": "none"}}
+    },
+    {
+      "name": "deny while untrusted",
+      "message": "response",
+      "body": {"version": 1, "verdict": "deny", "rule": "untrusted", "classes": ["web-fetch"], "legs": {"untrusted": "mcp", "sensitive": "none"}}
+    },
+    {
+      "name": "deny on the rule of two",
+      "message": "response",
+      "body": {"version": 1, "verdict": "deny", "rule": "rule_of_two", "classes": ["web-search", "persistence"], "legs": {"untrusted": "fetch", "sensitive": "credential"}}
+    }
+  ],
+  "invalid": [
+    {
+      "name": "commands are never sent",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "classes": ["net-client"], "command": "curl https://example.com"},
+      "error": "bad_request"
+    },
+    {
+      "name": "classes omitted",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a"},
+      "error": "bad_request"
+    },
+    {
+      "name": "classes null",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "classes": null},
+      "error": "bad_request"
+    },
+    {
+      "name": "unknown class",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "classes": ["teleport"]},
+      "error": "bad_request"
+    },
+    {
+      "name": "repeated class",
+      "message": "request",
+      "body": {"version": 1, "host": "claude_code", "session": "sess-a", "classes": ["dns", "dns"]},
+      "error": "bad_request"
+    },
+    {
+      "name": "deny with no rule",
+      "message": "response",
+      "body": {"version": 1, "verdict": "deny", "rule": "none", "classes": ["web-fetch"], "legs": {"untrusted": "mcp", "sensitive": "none"}},
+      "error": "bad_request"
+    },
+    {
+      "name": "pass naming a class",
+      "message": "response",
+      "body": {"version": 1, "verdict": "pass", "rule": "none", "classes": ["dns"], "legs": {"untrusted": "none", "sensitive": "none"}},
+      "error": "bad_request"
+    },
+    {
+      "name": "ask is not a verdict",
+      "message": "response",
+      "body": {"version": 1, "verdict": "ask", "rule": "untrusted", "classes": ["dns"], "legs": {"untrusted": "mcp", "sensitive": "none"}},
+      "error": "bad_request"
+    },
+    {
+      "name": "free-text reason",
+      "message": "response",
+      "body": {"version": 1, "verdict": "pass", "rule": "none", "classes": [], "legs": {"untrusted": "none", "sensitive": "none"}, "message": "all clear"},
+      "error": "bad_request"
+    }
+  ]
+}
