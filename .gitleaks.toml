@@ -1,0 +1,14 @@
+# gitleaks configuration for CI (.github/workflows/ci.yml).
+# Uses the default gitleaks rules, minus the two fake tokens that rules.yaml
+# carries as rule examples. Only those exact values are allowed, so any
+# other token, in rules.yaml or anywhere else, is still reported.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake tokens used as rules.yaml rule examples"
+regexes = [
+  '''^ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII$''',
+  '''^xoxb-1234567890-abcdefghij$''',
+]

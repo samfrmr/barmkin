@@ -1,0 +1,36 @@
+{
+  "allowManagedHooksOnly": true,
+  "prependPlugins": ["barmkin-shim@barmkin-local", "cc-plugin-sec-default@builtin"],
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "bwrapPath": "/usr/bin/bwrap",
+    "socatPath": "/usr/bin/socat"
+  },
+  "env": {
+    "BARMKIN_MONITOR_SOCKET": "/run/barmkin/monitor.sock"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/barmkin gate -socket /run/barmkin/monitor.sock",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "extraKnownMarketplaces": {
+    "barmkin-local": {
+      "source": { "source": "directory", "path": "/opt/barmkin/plugins/claude-code" }
+    }
+  },
+  "enabledPlugins": {
+    "barmkin-shim@barmkin-local": true
+  }
+}

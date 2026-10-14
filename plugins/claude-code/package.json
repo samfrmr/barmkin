@@ -1,0 +1,8 @@
+{
+  "name": "barmkin-claude-code-plugins",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test barmkin-shim.test.ts"
+  }
+}
