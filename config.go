@@ -35,6 +35,7 @@ type Rule struct {
 	Pattern string `yaml:"pattern"` // Go regex (re2) matched against command content
 	Action  string `yaml:"action"`  // "deny" (default) or "allow" (exempts deny matches inside its own match)
 	Reason  string `yaml:"reason"`  // shown to the LLM when denied
+	Secret  bool   `yaml:"secret"`  // matches are redacted from the audit log
 	Example string `yaml:"example"` // test string - verified by `go test` and `barmkin validate`
 	regex   *regexp.Regexp
 }

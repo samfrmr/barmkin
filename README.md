@@ -67,6 +67,7 @@ Edit `/etc/barmkin/rules.yaml`:
 ```yaml
 - name: "my-rule"
   pattern: 'dangerous\s+command'
+  secret: false                       # true: redact this rule's matches from the log
   action: "deny"                      # or "allow" to exempt the deny matches it covers
   reason: "Why it's blocked"
   example: "dangerous command --flag"  # must match, verified by tests
@@ -109,7 +110,7 @@ Each evaluation appends a JSON line to `~/.barmkin/barmkin.log`:
 {"ts":"2026-06-30T01:00:00Z","trajectory_id":"sess-123","tool":"bash","action":"ShellCommand","decision":"deny","reason":"Recursive force-delete","duration_ms":0.064,"rule":"rm-rf-force","content":"rm -rf /tmp","agent":"claude-code"}
 ```
 
-`content` holds the first 80 characters of the command. Secrets (AWS access keys, private key blocks, GitHub, Slack and GitLab tokens) are replaced with `[REDACTED:<rule>]` before the cut, so a blocked token of those kinds never reaches the log. `barmkin stats` aggregates. The format matches sondera's AuditEntry if you want to query both together.
+`content` holds the first 80 characters of the command. Matches of any rule marked `secret: true` (in the bundled rules: AWS access keys, private key blocks, GitHub, Slack and GitLab tokens) are replaced with `[REDACTED:<rule>]` before the cut, so a blocked secret never reaches the log. `barmkin stats` aggregates. The format matches sondera's AuditEntry if you want to query both together.
 
 ## OpenTelemetry
 

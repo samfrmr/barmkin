@@ -8,7 +8,6 @@ package main
 
 import (
 	"encoding/json"
-	"regexp"
 	"time"
 )
 
@@ -75,7 +74,7 @@ func (e *Engine) record(req Request, result HookOutput, content string, start ti
 		Reason:       result.Reason,
 		DurationMs:   float64(elapsed.Microseconds()) / 1000.0,
 		Rule:         result.Rule,
-		Content:      truncate(redactSecrets(content), 80),
+		Content:      truncate(redactSecrets(content, e.cfg.Rules), 80),
 		Agent:        req.AgentID,
 	}
 
@@ -99,27 +98,14 @@ func (e *Engine) close() {
 	}
 }
 
-// secretPatterns mirror the secret rules in rules.yaml. They are built
-// in rather than read from the config, so the log is redacted even when
-// the operator's config leaves those rules out. Each pattern matches
-// the secret value itself, without the rule's trailing \b, so a longer
-// token is redacted whole.
-var secretPatterns = []struct {
-	name string
-	re   *regexp.Regexp
-}{
-	{"aws-key", regexp.MustCompile(`AKIA[A-Z0-9]{16}`)},
-	{"private-key-block", regexp.MustCompile(`(?s)-----BEGIN\s+(RSA|EC|OPENSSH|PRIVATE)\s+(PRIVATE\s+)?KEY-----.*?(-----END[^-]*-----|\z)`)},
-	{"github-token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}`)},
-	{"slack-token", regexp.MustCompile(`\bxox[bpras]-[A-Za-z0-9-]+`)},
-	{"gitlab-token", regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`)},
-}
-
-// redactSecrets replaces every secret pattern match in s with
-// "[REDACTED:<rule>]".
-func redactSecrets(s string) string {
-	for _, p := range secretPatterns {
-		s = p.re.ReplaceAllLiteralString(s, "[REDACTED:"+p.name+"]")
+// redactSecrets replaces every match of a secret rule in s with
+// "[REDACTED:<rule>]". The rules come from the loaded config, so a
+// secret rule added there is redacted from the log as well as blocked.
+func redactSecrets(s string, rules []Rule) string {
+	for _, r := range rules {
+		if r.Secret {
+			s = r.regex.ReplaceAllLiteralString(s, "[REDACTED:"+r.Name+"]")
+		}
 	}
 	return s
 }

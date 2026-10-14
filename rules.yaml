@@ -192,26 +192,31 @@ rules:
 
   # ── Secrets ──────────────────────────────────────────────────────────
   - name: "aws-key"
+    secret: true
     pattern: '(?i)aws_access_key_id\s*=\s*AKIA[A-Z0-9]{16}'
     reason: "AWS access key in command"
     example: "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
 
   - name: "private-key-block"
-    pattern: '-----BEGIN\s+(RSA|EC|OPENSSH|PRIVATE)\s+(PRIVATE\s+)?KEY-----'
+    secret: true
+    pattern: '(?s)-----BEGIN\s+(RSA|EC|OPENSSH|PRIVATE)\s+(PRIVATE\s+)?KEY-----.*?(-----END[^-]*-----|\z)'
     reason: "Private key in content"
     example: "-----BEGIN RSA PRIVATE KEY-----"
 
   - name: "github-token"
+    secret: true
     pattern: '\bgh[pousr]_[A-Za-z0-9]{36}\b'
     reason: "GitHub token in command"
     example: "export GH_TOKEN=ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII"
 
   - name: "slack-token"
+    secret: true
     pattern: '\bxox[bpras]-[A-Za-z0-9-]+'
     reason: "Slack token in command"
     example: "export SLACK_TOKEN=xoxb-1234567890-abcdefghij"
 
   - name: "gitlab-token"
+    secret: true
     pattern: '\bglpat-[A-Za-z0-9_-]{20}\b'
     reason: "GitLab token in command"
     example: "export GITLAB_TOKEN=glpat-AAAAAAAAAAAAAAAAAAAA"

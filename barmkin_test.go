@@ -408,12 +408,10 @@ func TestRedactSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range cfg.Rules {
-		switch r.Name {
-		case "aws-key", "private-key-block", "github-token", "slack-token", "gitlab-token":
-		default:
+		if !r.Secret {
 			continue
 		}
-		got := redactSecrets(r.Example)
+		got := redactSecrets(r.Example, cfg.Rules)
 		if r.regex.MatchString(got) {
 			t.Errorf("%s: redacted %q still matches", r.Name, got)
 		}
@@ -423,10 +421,47 @@ func TestRedactSecrets(t *testing.T) {
 	}
 
 	key := "-----BEGIN RSA PRIVATE KEY-----\nMIIEbody\n-----END RSA PRIVATE KEY-----"
-	if got := redactSecrets("echo '" + key + "' > id_rsa"); got != "echo '[REDACTED:private-key-block]' > id_rsa" {
+	if got := redactSecrets("echo '"+key+"' > id_rsa", cfg.Rules); got != "echo '[REDACTED:private-key-block]' > id_rsa" {
 		t.Errorf("private key block: got %q", got)
 	}
-	if got := redactSecrets("rm -rf /tmp/build"); got != "rm -rf /tmp/build" {
+	if got := redactSecrets("rm -rf /tmp/build", cfg.Rules); got != "rm -rf /tmp/build" {
 		t.Errorf("non-secret content changed: %q", got)
+	}
+}
+
+// TestEngine_LogRedactsConfiguredSecretRule checks that a secret rule
+// outside the bundled set is redacted from the log it also blocks.
+func TestEngine_LogRedactsConfiguredSecretRule(t *testing.T) {
+	cfg := &Config{Rules: []Rule{
+		{Name: "acme-token", Pattern: `acme_[a-z0-9]{12}`, Secret: true},
+		{Name: "plain", Pattern: `PLAIN-[0-9]+`},
+	}}
+	for i := range cfg.Rules {
+		if err := cfg.Rules[i].compile(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(t.TempDir(), "barmkin.log")
+	cfg.Log.Path = logPath
+	e := newEngine(cfg)
+	input, _ := json.Marshal(map[string]any{
+		"tool_name":  "Bash",
+		"tool_input": map[string]any{"command": "deploy acme_abcdef123456 PLAIN-42"},
+	})
+	r := e.evaluate(input)
+	e.close()
+	if r.Decision != "deny" {
+		t.Fatalf("got %+v, want deny", r)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry AuditEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatal(err)
+	}
+	if want := "deploy [REDACTED:acme-token] PLAIN-42"; entry.Content != want {
+		t.Errorf("log content = %q, want %q", entry.Content, want)
 	}
 }
