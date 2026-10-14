@@ -1,4 +1,4 @@
-.PHONY: build test install clean validate monitor-demo claude-gate-demo claude-lock-lab shim-test managed-install managed-uninstall packaging-test-ubuntu packaging-test-nixos
+.PHONY: build test install clean validate monitor-demo claude-gate-demo claude-lock-lab shim-test e2e managed-install managed-uninstall packaging-test-ubuntu packaging-test-nixos
 
 build:
 	go build -o barmkin .
@@ -37,6 +37,9 @@ claude-lock-lab:
 
 shim-test:
 	cd plugins/claude-code && claude plugin validate --strict barmkin-shim && claude plugin test barmkin-shim
+
+e2e: build
+	cd plugins/claude-code && BARMKIN_E2E_BIN=$(CURDIR)/barmkin node --test 'e2e/*.test.ts'
 
 clean:
 	rm -f barmkin
