@@ -1,0 +1,62 @@
+# barmkin monitor, root-managed, running as the barmkin service user.
+#
+# Installed by packaging/install.sh (as /etc/systemd/system/barmkin-monitor.service)
+# and by the NixOS module in packaging/nixos, which rewrites the binary path.
+# systemd, running as root, creates both directories for the service user:
+#   /run/barmkin      barmkin:barmkin-clients 0750, holding the socket (0660)
+#   /var/lib/barmkin  barmkin:barmkin-clients 0700, holding the journal (0600)
+# The monitor checks this layout at every start and refuses to serve without it.
+
+[Unit]
+Description=barmkin monitor
+Documentation=https://github.com/samfrmr/barmkin#packaging-the-managed-monitor-and-claude-code-seat
+
+[Service]
+Type=simple
+User=barmkin
+Group=barmkin-clients
+ExecStart=/usr/local/bin/barmkin monitor -socket /run/barmkin/monitor.sock -state-dir /var/lib/barmkin -client-group barmkin-clients
+RuntimeDirectory=barmkin
+RuntimeDirectoryMode=0750
+StateDirectory=barmkin
+StateDirectoryMode=0700
+UMask=0077
+
+# A crash or SIGKILL restarts the monitor. It then replays its journal, and
+# every known lineage comes back tainted by monitor_restart.
+Restart=always
+RestartSec=1s
+
+# The monitor only listens on its Unix socket and writes its state
+# directory. The Jev screen, once wired in, will also need AF_INET and
+# AF_INET6.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# @system-service less @resources, @setuid and the groups of @privileged
+# other than @chown, which the monitor needs to give its socket to the
+# client group.
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @setuid @clock @module @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
