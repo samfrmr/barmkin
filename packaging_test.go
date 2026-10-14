@@ -18,22 +18,7 @@ import (
 // state directories at the monitor's default paths with the modes it
 // checks, the client group, and a restart after SIGKILL.
 func TestPackagingUnit(t *testing.T) {
-	f, err := os.Open("packaging/systemd/barmkin-monitor.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	unit := map[string][]string{}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if k, v, ok := strings.Cut(line, "="); ok && !strings.HasPrefix(line, "#") {
-			unit[k] = append(unit[k], v)
-		}
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatal(err)
-	}
+	unit := readUnit(t, "packaging/systemd/barmkin-monitor.service")
 	one := func(key string) string {
 		t.Helper()
 		if len(unit[key]) != 1 {
@@ -67,6 +52,71 @@ func TestPackagingUnit(t *testing.T) {
 		" -state-dir " + imonitor.DefaultStateDir + " -client-group " + imonitor.DefaultClientGroup
 	if got := one("ExecStart"); got != want {
 		t.Errorf("ExecStart=%s, want %s", got, want)
+	}
+	// The default deployment has no administrative socket.
+	if strings.Contains(want, "admin") || unit["Sockets"] != nil {
+		t.Errorf("the monitor unit opts in to the administrative socket: %v", unit)
+	}
+}
+
+// readUnit returns a systemd unit file's settings, key to values.
+func readUnit(t *testing.T, path string) map[string][]string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	unit := map[string][]string{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if k, v, ok := strings.Cut(line, "="); ok && !strings.HasPrefix(line, "#") {
+			unit[k] = append(unit[k], v)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return unit
+}
+
+// TestPackagingAdminSocket holds the opt-in administrative socket to what
+// the monitor checks: systemd creates it root's, 0600, in a root directory
+// no one else can enter, at the default path monitor-admin uses, and passes
+// it under the name the monitor looks for. The drop-in runs the base unit's
+// command with -admin-socket and nothing else changed.
+func TestPackagingAdminSocket(t *testing.T) {
+	sock := readUnit(t, "packaging/systemd/barmkin-monitor-admin.socket")
+	for key, want := range map[string]string{
+		"ListenStream":       imonitor.DefaultAdminSocket,
+		"SocketUser":         "root",
+		"SocketGroup":        "root",
+		"SocketMode":         "0600",
+		"DirectoryMode":      "0700",
+		"FileDescriptorName": imonitor.AdminFDName,
+		"Service":            "barmkin-monitor.service",
+	} {
+		if got := sock[key]; len(got) != 1 || got[0] != want {
+			t.Errorf("socket %s=%v, want %s", key, got, want)
+		}
+	}
+	if sock["WantedBy"] != nil {
+		t.Errorf("the socket is enabled on its own (WantedBy=%v); only the drop-in may pull it in", sock["WantedBy"])
+	}
+
+	base := readUnit(t, "packaging/systemd/barmkin-monitor.service")["ExecStart"][0]
+	dropin := readUnit(t, "packaging/systemd/barmkin-monitor-admin.conf")
+	if want := []string{"", base + " -admin-socket " + imonitor.DefaultAdminSocket}; !reflect.DeepEqual(dropin["ExecStart"], want) {
+		t.Errorf("drop-in ExecStart=%q, want %q", dropin["ExecStart"], want)
+	}
+	for _, key := range []string{"Requires", "After", "Sockets"} {
+		if got := dropin[key]; len(got) != 1 || got[0] != "barmkin-monitor-admin.socket" {
+			t.Errorf("drop-in %s=%v, want barmkin-monitor-admin.socket", key, got)
+		}
+	}
+	if len(dropin) != 4 {
+		t.Errorf("the drop-in changes more than the socket and the command: %v", dropin)
 	}
 }
 

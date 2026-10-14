@@ -297,7 +297,7 @@ func TestPreregisterAndGate(t *testing.T) {
 func TestSessionCap(t *testing.T) {
 	c, _ := testCore(t)
 	for i := range MaxSessions {
-		c.sessions[sessionKey{alice, proto.HostClaudeCode, time.Duration(i).String()}] = "r"
+		c.sessions[sessionKey{alice, proto.HostClaudeCode, time.Duration(i).String()}] = session{root: "r"}
 	}
 	if _, code := call(t, c, alice, reg("one-more", "one-more", true)); code != proto.CodeUnavailable {
 		t.Errorf("register past the cap: %q", code)
@@ -429,8 +429,8 @@ func FuzzTightenOnly(f *testing.F) {
 				c = newCore(c.snapshot(), true)
 				c.journal = j
 			}
-			for sk, root := range c.sessions {
-				now := *c.lineages[lineageKey{sk.uid, sk.host, root}]
+			for sk, s := range c.sessions {
+				now := c.lineages[lineageKey{sk.uid, sk.host, s.root}].legs
 				was, ok := seen[sk]
 				if ok && (lowered(was.Untrusted, now.Untrusted) || lowered(was.Sensitive, now.Sensitive)) {
 					t.Fatalf("op %d (%d): session %+v went from %+v to %+v", i, op, sk, was, now)

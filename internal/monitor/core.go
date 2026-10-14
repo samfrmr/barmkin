@@ -48,6 +48,26 @@ type appender interface {
 	Append(...journal.Record) error
 }
 
+// session is a registered session: the root of its lineage, the lineage
+// epoch it last registered in, and when, in Unix seconds.
+type session struct {
+	root  string
+	epoch uint64
+	at    int64
+}
+
+// lineage is a root lineage's taint: its legs, when each rose (Unix
+// seconds; 0 while down or when an older journal did not say), its epoch,
+// and its history: the raises each earlier epoch held and the clear that
+// ended it, in order. Only an administrative clear starts a new epoch.
+type lineage struct {
+	legs        proto.Legs
+	untrustedAt int64
+	sensitiveAt int64
+	epoch       uint64
+	history     []journal.Record
+}
+
 // core holds the monitor's state and answers its operations. One mutex
 // serialises every operation; a change is journaled under it before the
 // operation returns, and only then handed to the telemetry export, which
@@ -55,8 +75,8 @@ type appender interface {
 type core struct {
 	mu       sync.Mutex
 	journal  appender
-	sessions map[sessionKey]string // session -> the root of its lineage
-	lineages map[lineageKey]*proto.Legs
+	sessions map[sessionKey]session
+	lineages map[lineageKey]*lineage
 	calls    map[callKey]time.Time // pre-registrations and their expiry
 	ttl      time.Duration
 	now      func() time.Time
@@ -74,56 +94,98 @@ type core struct {
 // so every lineage's untrusted leg is raised by monitor_restart.
 func newCore(records []journal.Record, clean bool) *core {
 	c := &core{
-		sessions: map[sessionKey]string{},
-		lineages: map[lineageKey]*proto.Legs{},
+		sessions: map[sessionKey]session{},
+		lineages: map[lineageKey]*lineage{},
 		calls:    map[callKey]time.Time{},
 		ttl:      DefaultPreregisterTTL,
 		now:      time.Now,
 	}
 	for _, r := range records {
+		lk := lineageKey{r.UID, r.Host, r.Root}
 		switch r.Kind {
 		case journal.KindRegister:
 			sk := sessionKey{r.UID, r.Host, r.Session}
-			if _, ok := c.sessions[sk]; !ok {
-				c.sessions[sk] = r.Root
+			s, ok := c.sessions[sk]
+			if !ok {
+				s.root = r.Root
 			}
-			c.lineage(lineageKey{r.UID, r.Host, r.Root})
+			s.epoch, s.at = r.Epoch, r.At
+			c.sessions[sk] = s
+			c.lineage(lk)
 		case journal.KindRaise:
-			c.raise(lineageKey{r.UID, r.Host, r.Root}, r.Leg, r.Source)
+			c.raise(lk, r.Leg, r.Source, r.At)
+		case journal.KindClear:
+			c.applyClear(lk, r)
 		}
 	}
 	if !clean {
+		at := c.now().Unix()
 		for lk := range c.lineages {
-			c.restarted = append(c.restarted, c.raise(lk, journal.LegUntrusted, proto.SourceMonitorRestart)...)
+			c.restarted = append(c.restarted, c.raise(lk, journal.LegUntrusted, proto.SourceMonitorRestart, at)...)
 		}
 	}
 	return c
 }
 
-// lineage returns lk's legs, creating clean legs when lk is new.
-func (c *core) lineage(lk lineageKey) *proto.Legs {
-	legs, ok := c.lineages[lk]
+var cleanLegs = proto.Legs{Untrusted: proto.SourceNone, Sensitive: proto.SourceNone}
+
+// lineage returns lk's state, creating a clean lineage when lk is new.
+func (c *core) lineage(lk lineageKey) *lineage {
+	l, ok := c.lineages[lk]
 	if !ok {
-		legs = &proto.Legs{Untrusted: proto.SourceNone, Sensitive: proto.SourceNone}
-		c.lineages[lk] = legs
+		l = &lineage{legs: cleanLegs}
+		c.lineages[lk] = l
 	}
-	return legs
+	return l
 }
 
-// raise raises leg of lk to source, unless it is already up: legs only
-// rise, and the first source to raise one stays. It returns the record to
-// journal, or none when nothing changed.
-func (c *core) raise(lk lineageKey, leg journal.Leg, source proto.Source) []journal.Record {
-	legs := c.lineage(lk)
-	slot := &legs.Untrusted
+// raise raises leg of lk to source at time at, unless it is already up:
+// legs only rise, and the first source to raise one stays. It returns the
+// record to journal, or none when nothing changed.
+func (c *core) raise(lk lineageKey, leg journal.Leg, source proto.Source, at int64) []journal.Record {
+	l := c.lineage(lk)
+	slot, when := &l.legs.Untrusted, &l.untrustedAt
 	if leg == journal.LegSensitive {
-		slot = &legs.Sensitive
+		slot, when = &l.legs.Sensitive, &l.sensitiveAt
 	}
 	if *slot != proto.SourceNone {
 		return nil
 	}
-	*slot = source
-	return []journal.Record{{Kind: journal.KindRaise, UID: lk.uid, Host: lk.host, Root: lk.root, Leg: leg, Source: source}}
+	*slot, *when = source, at
+	return []journal.Record{raiseRecord(lk, leg, source, at)}
+}
+
+func raiseRecord(lk lineageKey, leg journal.Leg, source proto.Source, at int64) journal.Record {
+	return journal.Record{Kind: journal.KindRaise, UID: lk.uid, Host: lk.host, Root: lk.root, Leg: leg, Source: source, At: at}
+}
+
+// raised returns the raise records that rebuild lk's current legs.
+func (l *lineage) raised(lk lineageKey) []journal.Record {
+	var out []journal.Record
+	if l.legs.Untrusted != proto.SourceNone {
+		out = append(out, raiseRecord(lk, journal.LegUntrusted, l.legs.Untrusted, l.untrustedAt))
+	}
+	if l.legs.Sensitive != proto.SourceNone {
+		out = append(out, raiseRecord(lk, journal.LegSensitive, l.legs.Sensitive, l.sensitiveAt))
+	}
+	return out
+}
+
+// applyClear applies a journaled clear record to lk: the raised legs and the
+// clear move to the lineage's history, both legs fall, the lineage enters
+// the record's epoch, and every pre-registration of its sessions is
+// dropped. A session of the lineage registered in an earlier epoch must
+// register again before anything else it asks is answered.
+func (c *core) applyClear(lk lineageKey, rec journal.Record) {
+	l := c.lineage(lk)
+	l.history = append(append(l.history, l.raised(lk)...), rec)
+	l.legs, l.untrustedAt, l.sensitiveAt = cleanLegs, 0, 0
+	l.epoch = rec.Epoch
+	for ck := range c.calls {
+		if s, ok := c.sessions[ck.sessionKey]; ok && ck.uid == lk.uid && ck.host == lk.host && s.root == lk.root {
+			delete(c.calls, ck)
+		}
+	}
 }
 
 // commit journals records before the operation that made them answers.
@@ -144,27 +206,35 @@ func (c *core) commit(records []journal.Record) error {
 }
 
 // snapshot returns records that rebuild the current state, in a stable
-// order: every session, then every raised leg.
+// order: every session, then each lineage's history of cleared raises and
+// clears, then every raised leg.
 func (c *core) snapshot() []journal.Record {
-	var regs, raises []journal.Record
-	for sk, root := range c.sessions {
-		regs = append(regs, journal.Record{Kind: journal.KindRegister, UID: sk.uid, Host: sk.host, Session: sk.session, Root: root})
+	var regs, history, raises []journal.Record
+	for sk, s := range c.sessions {
+		regs = append(regs, journal.Record{Kind: journal.KindRegister, UID: sk.uid, Host: sk.host, Session: sk.session, Root: s.root, Epoch: s.epoch, At: s.at})
 	}
-	for lk, legs := range c.lineages {
-		if legs.Untrusted != proto.SourceNone {
-			raises = append(raises, journal.Record{Kind: journal.KindRaise, UID: lk.uid, Host: lk.host, Root: lk.root, Leg: journal.LegUntrusted, Source: legs.Untrusted})
-		}
-		if legs.Sensitive != proto.SourceNone {
-			raises = append(raises, journal.Record{Kind: journal.KindRaise, UID: lk.uid, Host: lk.host, Root: lk.root, Leg: journal.LegSensitive, Source: legs.Sensitive})
-		}
+	for _, lk := range c.lineageKeys() {
+		l := c.lineages[lk]
+		history = append(history, l.history...)
+		raises = append(raises, l.raised(lk)...)
 	}
-	order := func(a, b journal.Record) int {
+	slices.SortFunc(regs, func(a, b journal.Record) int {
 		return cmp.Or(cmp.Compare(a.UID, b.UID), cmp.Compare(a.Host, b.Host),
-			cmp.Compare(a.Root, b.Root), cmp.Compare(a.Session, b.Session), cmp.Compare(a.Leg, b.Leg))
+			cmp.Compare(a.Root, b.Root), cmp.Compare(a.Session, b.Session))
+	})
+	return append(append(regs, history...), raises...)
+}
+
+// lineageKeys returns every lineage's key, sorted.
+func (c *core) lineageKeys() []lineageKey {
+	keys := make([]lineageKey, 0, len(c.lineages))
+	for lk := range c.lineages {
+		keys = append(keys, lk)
 	}
-	slices.SortFunc(regs, order)
-	slices.SortFunc(raises, order)
-	return append(regs, raises...)
+	slices.SortFunc(keys, func(a, b lineageKey) int {
+		return cmp.Or(cmp.Compare(a.uid, b.uid), cmp.Compare(a.host, b.host), cmp.Compare(a.root, b.root))
+	})
+	return keys
 }
 
 // close stops the core answering and journals a clean stop.
@@ -193,23 +263,29 @@ func postureOK(p proto.Posture) bool { return p.SandboxEnabled && !p.AllowAllUni
 // root resolves the lineage a token names: a registered session's own
 // lineage root, or the token itself.
 func (c *core) root(uid uint32, host proto.Host, token string) string {
-	if root, ok := c.sessions[sessionKey{uid, host, token}]; ok {
-		return root
+	if s, ok := c.sessions[sessionKey{uid, host, token}]; ok {
+		return s.root
 	}
 	return token
 }
 
-// known returns the legs of a registered session, or fails unknown_session.
+// known returns the legs of a registered session, or fails
+// unknown_session. A session registered before its lineage was cleared is
+// unknown until it registers again in the lineage's new epoch.
 func (c *core) known(uid uint32, host proto.Host, session string) (lineageKey, *proto.Legs, error) {
 	if c.degraded {
 		return lineageKey{}, nil, fail(proto.CodeUnavailable)
 	}
-	root, ok := c.sessions[sessionKey{uid, host, session}]
+	s, ok := c.sessions[sessionKey{uid, host, session}]
 	if !ok {
 		return lineageKey{}, nil, fail(proto.CodeUnknownSession)
 	}
-	lk := lineageKey{uid, host, root}
-	return lk, c.lineage(lk), nil
+	lk := lineageKey{uid, host, s.root}
+	l := c.lineage(lk)
+	if s.epoch != l.epoch {
+		return lineageKey{}, nil, fail(proto.CodeUnknownSession)
+	}
+	return lk, &l.legs, nil
 }
 
 // handle answers one decoded request from a client with uid.
@@ -256,7 +332,8 @@ func (c *core) handle(uid uint32, req proto.Message) (proto.Message, error) {
 // seen starts clean only for a fresh top-level session, and otherwise with
 // its untrusted leg raised by unknown_session, since its history is not
 // known to be clean. Registering again returns the legs unchanged, and can
-// never move a session to another lineage.
+// never move a session to another lineage; a session registered before its
+// lineage was cleared joins the lineage's new epoch.
 func (c *core) register(uid uint32, req *proto.RegisterRequest) (proto.Message, error) {
 	if c.degraded {
 		return nil, fail(proto.CodeUnavailable)
@@ -266,11 +343,20 @@ func (c *core) register(uid uint32, req *proto.RegisterRequest) (proto.Message, 
 	}
 	sk := sessionKey{uid, req.Host, req.Session}
 	root := c.root(uid, req.Host, req.Root)
+	at := c.now().Unix()
 	if have, ok := c.sessions[sk]; ok {
-		if root != have && req.Root != have {
+		if root != have.root && req.Root != have.root {
 			return nil, fail(proto.CodeBadRequest)
 		}
-		return &proto.RegisterResponse{Version: proto.Version, Legs: *c.lineage(lineageKey{uid, req.Host, have})}, nil
+		l := c.lineage(lineageKey{uid, req.Host, have.root})
+		if have.epoch != l.epoch {
+			rec := journal.Record{Kind: journal.KindRegister, UID: uid, Host: req.Host, Session: req.Session, Root: have.root, Epoch: l.epoch, At: at}
+			if err := c.commit([]journal.Record{rec}); err != nil {
+				return nil, err
+			}
+			c.sessions[sk] = session{root: have.root, epoch: l.epoch, at: at}
+		}
+		return &proto.RegisterResponse{Version: proto.Version, Legs: l.legs}, nil
 	}
 	if len(c.sessions) >= MaxSessions {
 		return nil, fail(proto.CodeUnavailable)
@@ -278,16 +364,16 @@ func (c *core) register(uid uint32, req *proto.RegisterRequest) (proto.Message, 
 
 	lk := lineageKey{uid, req.Host, root}
 	_, seen := c.lineages[lk]
-	c.sessions[sk] = root
-	legs := c.lineage(lk)
-	records := []journal.Record{{Kind: journal.KindRegister, UID: uid, Host: req.Host, Session: req.Session, Root: root}}
+	l := c.lineage(lk)
+	c.sessions[sk] = session{root: root, epoch: l.epoch, at: at}
+	records := []journal.Record{{Kind: journal.KindRegister, UID: uid, Host: req.Host, Session: req.Session, Root: root, Epoch: l.epoch, At: at}}
 	if !seen && !(req.Fresh && root == req.Session) {
-		records = append(records, c.raise(lk, journal.LegUntrusted, proto.SourceUnknownSession)...)
+		records = append(records, c.raise(lk, journal.LegUntrusted, proto.SourceUnknownSession, at)...)
 	}
 	if err := c.commit(records); err != nil {
 		return nil, err
 	}
-	return &proto.RegisterResponse{Version: proto.Version, Legs: *legs}, nil
+	return &proto.RegisterResponse{Version: proto.Version, Legs: l.legs}, nil
 }
 
 func (c *core) preregister(uid uint32, req *proto.PreregisterRequest) (proto.Message, error) {
@@ -331,7 +417,7 @@ func (c *core) observe(uid uint32, req *proto.ObserveRequest) (proto.Message, er
 	if req.Source == proto.SourceCredential {
 		leg = journal.LegSensitive
 	}
-	if err := c.commit(c.raise(lk, leg, req.Source)); err != nil {
+	if err := c.commit(c.raise(lk, leg, req.Source, c.now().Unix())); err != nil {
 		return nil, err
 	}
 	return &proto.ObserveResponse{Version: proto.Version, Legs: *legs}, nil
@@ -346,7 +432,7 @@ func (c *core) screen(uid uint32, req *proto.ScreenRequest) (proto.Message, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := c.commit(c.raise(lk, journal.LegUntrusted, req.Source)); err != nil {
+	if err := c.commit(c.raise(lk, journal.LegUntrusted, req.Source, c.now().Unix())); err != nil {
 		return nil, err
 	}
 	return nil, fail(proto.CodeUnavailable)

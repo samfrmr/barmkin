@@ -4,6 +4,11 @@
 #   imports = [ ./packaging/nixos/module.nix ];
 #   services.barmkin = { enable = true; clients = [ "alice" ]; };
 #
+# services.barmkin.adminSocket.enable (off by default) also installs the
+# root-only administrative socket, barmkin-monitor-admin.socket, with the
+# drop-in that hands it to the monitor, and puts barmkin on the system PATH
+# for root's `barmkin monitor-admin`. Without it, nothing lowers a leg.
+#
 # It declares the system group barmkin-clients (with the clients as members)
 # and the system user barmkin, runs packaging/systemd/barmkin-monitor.service
 # from the package, and writes /etc/claude-code/managed-settings.json from
@@ -23,6 +28,13 @@ let
   recipe = lib.importJSON ../../plugins/claude-code/managed-settings.example.json;
   recipeGate = "/usr/local/bin/barmkin gate -socket ${socket}";
   gate = "${lib.getExe cfg.package} gate -socket ${socket} -monitor-uid ${toString cfg.uid}";
+
+  # The opt-in administrative socket unit and the monitor's drop-in, from
+  # the package, as a unit package of their own.
+  adminUnits = pkgs.runCommand "barmkin-admin-units" { } ''
+    mkdir -p $out/lib/systemd/system
+    cp -R ${cfg.package}/share/barmkin/systemd/. $out/lib/systemd/system/
+  '';
 
   pinGate = hook: if hook.command or null == recipeGate then hook // { command = gate; } else hook;
   preToolUse = map (entry: entry // { hooks = map pinGate entry.hooks; }) recipe.hooks.PreToolUse;
@@ -57,6 +69,13 @@ in
       '';
     };
 
+    adminSocket.enable = lib.mkEnableOption ''
+      the monitor's root-only administrative socket, through which root's
+      `barmkin monitor-admin clear` lowers one lineage's legs from a terminal.
+      Off by default, so the taint is sticky. Clearing monitor state does not
+      remove untrusted material already in an AI conversation
+    '';
+
     clients = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -81,7 +100,8 @@ in
       description = "barmkin monitor";
     };
 
-    systemd.packages = [ cfg.package ];
+    systemd.packages = [ cfg.package ] ++ lib.optional cfg.adminSocket.enable adminUnits;
+    environment.systemPackages = lib.optional cfg.adminSocket.enable cfg.package;
     systemd.services.barmkin-monitor.wantedBy = [ "multi-user.target" ];
 
     environment.etc."claude-code/managed-settings.json" = {

@@ -22,6 +22,9 @@ const (
 	DefaultSocket      = "/run/barmkin/monitor.sock"
 	DefaultStateDir    = "/var/lib/barmkin"
 	DefaultClientGroup = "barmkin-clients"
+	// DefaultAdminSocket is where barmkin-monitor-admin.socket puts the
+	// opt-in administrative socket, in a directory only root can enter.
+	DefaultAdminSocket = "/run/barmkin-admin/admin.sock"
 )
 
 // maxSocketPath is the longest socket path bind accepts (sun_path less
@@ -35,6 +38,12 @@ type Config struct {
 	ClientGroup    string        // the group whose members may connect
 	PreregisterTTL time.Duration // how long a pre-registration stays live
 	Logf           func(format string, args ...any)
+
+	// AdminSocket, when set, is the path of the root-owned administrative
+	// socket systemd passes to the monitor (internal/admin). It is empty by
+	// default: the monitor then has no administrative socket, and nothing
+	// lowers a leg.
+	AdminSocket string
 
 	// Telemetry, when set, exports the journal's state changes to an
 	// OTLP/HTTP collector (internal/telemetry). It comes from root's
@@ -51,6 +60,7 @@ type Monitor struct {
 	telemetry *telemetry.Exporter
 	lock      *os.File
 	ln        net.Listener
+	adminLn   net.Listener // nil without an administrative socket
 	logf      func(format string, args ...any)
 }
 
@@ -117,6 +127,12 @@ func Start(cfg Config) (*Monitor, error) {
 		return nil, err
 	}
 	m.core.ttl = cfg.PreregisterTTL
+	if cfg.AdminSocket != "" {
+		if m.adminLn, err = startAdmin(cfg.AdminSocket); err != nil {
+			m.Close()
+			return nil, err
+		}
+	}
 	if m.ln, err = listen(cfg.Socket, gid); err != nil {
 		m.Close()
 		return nil, fmt.Errorf("listen: %w", err)
@@ -193,10 +209,39 @@ func moveAside(path string) (string, error) {
 }
 
 // Serve answers requests until ctx is done, then stops accepting, drains
-// the requests in flight, journals a clean stop and closes the monitor.
+// the requests in flight, journals a clean stop and closes the monitor. With
+// an administrative socket it serves that too, on its own server.
 func (m *Monitor) Serve(ctx context.Context) error {
-	srv := &http.Server{
-		Handler:           m.core,
+	servers := []*http.Server{newServer(m.core)}
+	listeners := []net.Listener{peerListener{m.ln}}
+	if m.adminLn != nil {
+		servers = append(servers, newServer(adminHandler{core: m.core, logf: m.logf}))
+		listeners = append(listeners, m.adminLn)
+	}
+	done := make(chan error, len(servers))
+	for i, srv := range servers {
+		go func() { done <- srv.Serve(listeners[i]) }()
+	}
+
+	var serveErr error
+	select {
+	case <-ctx.Done():
+	case serveErr = <-done:
+	}
+	shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for _, srv := range servers {
+		srv.Shutdown(shutdown)
+	}
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	return errors.Join(serveErr, m.Close())
+}
+
+func newServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      5 * time.Second,
@@ -209,21 +254,6 @@ func (m *Monitor) Serve(ctx context.Context) error {
 			return ctx
 		},
 	}
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(peerListener{m.ln}) }()
-
-	var serveErr error
-	select {
-	case <-ctx.Done():
-		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdown)
-	case serveErr = <-done:
-	}
-	if errors.Is(serveErr, http.ErrServerClosed) {
-		serveErr = nil
-	}
-	return errors.Join(serveErr, m.Close())
 }
 
 // Close journals a clean stop when the monitor is healthy, and releases
@@ -232,6 +262,9 @@ func (m *Monitor) Close() error {
 	var errs []error
 	if m.ln != nil {
 		errs = append(errs, ignoreClosed(m.ln.Close()))
+	}
+	if m.adminLn != nil {
+		errs = append(errs, ignoreClosed(m.adminLn.Close()))
 	}
 	if m.core != nil && m.core.journal != nil {
 		errs = append(errs, m.core.close())

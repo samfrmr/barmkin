@@ -30,6 +30,7 @@ test       run the deny and allow test vectors
 stats      aggregate decisions from the log file
 gate       managed Claude Code PreToolUse check for shim presence, exit 0 or 2
 monitor    run the monitor service
+monitor-admin list|clear   root only: list monitor lineages, or clear one (see "Administrative clear (opt-in)")
 version    print the version
 ```
 
@@ -117,6 +118,7 @@ The successor's monitor ([`internal/monitor`](internal/monitor)) serves the vers
 ```
 barmkin monitor [-socket /run/barmkin/monitor.sock] [-state-dir /var/lib/barmkin]
                 [-client-group barmkin-clients] [-preregister-ttl 10s]
+                [-admin-socket /run/barmkin-admin/admin.sock]
                 [-telemetry-config /etc/barmkin/monitor-telemetry.json]
 ```
 
@@ -130,16 +132,39 @@ barmkin monitor [-socket /run/barmkin/monitor.sock] [-state-dir /var/lib/barmkin
 
 The journal is `0600`. The socket is `0660`, group `barmkin-clients`. The monitor identifies every connection by its peer credentials (`SO_PEERCRED`), and a session key includes the client's uid, so one user cannot touch another's sessions.
 
-**Sessions and taint.** Each session belongs to a root lineage that holds two legs, *untrusted* and *sensitive*. Legs only rise, and the first source to raise a leg stays. There is no clear, rotate or capability operation.
+**Sessions and taint.** Each session belongs to a root lineage that holds two legs, *untrusted* and *sensitive*. Legs only rise, and the first source to raise a leg stays. Nothing a client sends lowers a leg: the shim contract has no clear, rotate or capability operation. The only way down is root's [administrative clear](#administrative-clear-opt-in), which is off by default.
 
 - `register` refuses a host whose sandbox is off or allows every Unix socket (`posture_refused`).
 - Only a fresh top-level session starts clean. Any other new lineage starts with its untrusted leg raised by `unknown_session`, and every operation on an unregistered session fails `unknown_session`.
 - `decide` applies the egress postures: with the untrusted leg up it denies the deny classes and warns on the rest; with both legs up it denies everything; a clean session gets warnings only for destructive classes.
 
-**Journal.** A leg raise or registration is fsynced before the reply. At start the monitor replays the journal and compacts it. After an unclean stop (a crash, `SIGKILL` or a damaged record), every known lineage gets its untrusted leg raised by `monitor_restart`. A damaged journal is moved aside, and only its valid records are replayed. A journal with the wrong owner or mode, or one that is a symlink or not a regular file, stops the monitor from starting. If a change cannot be journaled, `health` reports `degraded` and every other operation fails `unavailable`.
+**Journal.** A leg raise, registration or administrative clear is fsynced before the reply. At start the monitor replays the journal and compacts it. After an unclean stop (a crash, `SIGKILL` or a damaged record), every known lineage gets its untrusted leg raised by `monitor_restart`. A damaged journal is moved aside, and only its valid records are replayed. A journal with the wrong owner or mode, or one that is a symlink or not a regular file, stops the monitor from starting. If a change cannot be journaled, `health` reports `degraded` and every other operation fails `unavailable`.
 
 > [!IMPORTANT]
 > The screen service ([`internal/screen`](internal/screen), the Jev screen ported from barmkin-mod) is not wired into the monitor yet. Until it is, `/v1/screen` raises the untrusted leg for the content's source and answers `unavailable`, so both shims withhold all untrusted content.
+
+### Administrative clear (opt-in)
+
+Root can clear one lineage's taint through a separate, root-owned administrative socket. It is off by default: without it the taint is sticky, and nothing lowers a leg. There is no automatic clear, and no Claude Code or OpenCode command clears.
+
+**Clearing monitor state does not remove untrusted material already in an AI conversation.** Whatever the session read, a prompt injection included, is still in its context after a clear and can still steer it. Clear a lineage only when you have checked what raised its legs.
+
+**The socket.** systemd, as root, creates `/run/barmkin-admin` (`root:root`, `0700`) and the socket `admin.sock` in it (`root:root`, `0600`) from `packaging/systemd/barmkin-monitor-admin.socket`, and passes it to the monitor by socket activation. The drop-in `barmkin-monitor-admin.conf` adds `-admin-socket /run/barmkin-admin/admin.sock` to the monitor's command. The monitor never creates this socket itself. It refuses to start with `-admin-socket` unless systemd passed it the socket, and unless the directory is root's with no group or other access. It reads every connection's peer credentials (`SO_PEERCRED`) and closes any connection that is not from root before reading it. A request from another uid gets `forbidden`. The client socket answers none of the administrative paths (`/admin/v1/list`, `/admin/v1/clear`), so no shim, plugin, MCP server, managed gate or ordinary user can reach them. The contract is in [`internal/admin`](internal/admin/admin.go).
+
+**The command.** Root runs `barmkin monitor-admin`:
+
+```
+barmkin monitor-admin list  [-admin-socket PATH] [-json]
+barmkin monitor-admin clear -uid UID -host claude_code|opencode -lineage ID \
+                            -reason false_positive|reviewed_safe|monitor_recovery [-admin-socket PATH]
+```
+
+- `list` shows each lineage without content: the opaque lineage id, the client's uid and host, the epoch, each leg with the closed source that raised it and when, the session ids, and every earlier clear with the legs it lowered.
+- `clear` names one lineage exactly. A subagent's session id, another uid or another host is refused. The reason is one of three fixed codes, never free text. `clear` needs a terminal on standard input. It shows the lineage and the warning above, and clears only when you type the lineage id back. It sends the epoch and legs it showed, so if the lineage has changed since, the monitor refuses the clear (`mismatch`). Both subcommands refuse to run as anyone but root, or to talk to a socket that is not root's in a directory only root can enter.
+
+**What a clear does.** The monitor appends a `clear` record to the journal (lineage, new epoch, reason, time) and fsyncs it before it lowers the legs or answers. If the journal cannot take the record, nothing is lowered and the monitor degrades. The cleared raises stay in the journal and in `list` as history. The monitor drops every pre-registration of the lineage's sessions, so each session gets `unknown_session` on its next request until it registers again in the new epoch; both shims re-register on that error. Legs can rise again as usual. Each clear is logged, and clear records are never exported through OpenTelemetry. A clear survives a clean restart. After a crash, `monitor_restart` taints every lineage again, as it always does.
+
+**Turning it on.** On Debian and Ubuntu, `sudo packaging/install.sh install --admin-socket`; running `install` again without it removes the socket. On NixOS, set `services.barmkin.adminSocket.enable = true;`, which also puts `barmkin` on root's system `PATH`; switching back removes the socket, though the empty root-only `/run/barmkin-admin` stays until reboot. Root is trusted here as everywhere: a process running as root can talk to the socket without a terminal, so never run an agent as root.
 
 ### Telemetry export
 
@@ -175,7 +200,7 @@ A managed Claude Code seat runs two pieces in every session, and both talk to th
 - **The shim** ([`plugins/claude-code/barmkin-shim`](plugins/claude-code/barmkin-shim)) is a hooks module ported from barmkin-mod. It registers the session along with its sandbox posture, and it pre-registers each `tool_use_id` before Claude Code runs the call. It classifies egress-capable calls (shell, web fetch and search, MCP, Monitor WebSockets, persistence-file writes, skill loads) so the monitor can decide on them. It also redacts untrusted content into windows for `/v1/screen` and reports credential paths, credential-shaped values and hidden text as leg raises. Locally it does secret redaction, the invisible-text scrub, MCP description hardening with a per-server allowlist (`mcp_server_allowlist`), the skill-listing guard, outbound DLP, the posture warnings, the HUD band and `/barmkin-status`.
 - **The gate** (`barmkin gate`) is a managed PreToolUse hook on every tool. It reads only `session_id` and `tool_use_id`, and it allows a call only if the shim pre-registered that exact call (`/v1/gate`). A session without a working shim can run no tools: the deny says `barmkin shim not present`.
 
-The taint is sticky: no prompt, command, compaction or `/clear` lowers a leg. Failure denies: every shim request has a 1-second deadline, and a timeout, error, malformed reply or contract-version mismatch denies the step it guards.
+The taint is sticky: no prompt, command, compaction or `/clear` lowers a leg. Only root's opt-in [administrative clear](#administrative-clear-opt-in) does, and the shim then re-registers the session when the monitor answers `unknown_session`. Failure denies: every shim request has a 1-second deadline, and a timeout, error, malformed reply or contract-version mismatch denies the step it guards.
 
 The gate exits 2, with its reason on stderr, for `unregistered`, `unknown-session`, `malformed-request`, `malformed-response`, `version-mismatch`, `monitor-unavailable`, `monitor-uid-mismatch` (when `-monitor-uid` pins the monitor's uid) and `deadline-exceeded` (3 seconds). It never exits with any other code, because Claude Code would treat that as a non-blocking error. Built static, the gate costs about 4 ms per call at p50.
 
@@ -197,7 +222,7 @@ Managed settings lock every Claude Code user on the machine, so install the seat
 
 ## OpenCode 2.x shim
 
-[`shims/opencode`](shims/opencode/README.md) is the `barmkin-opencode` plugin for OpenCode 2.x, ported from barmkin-mod. Each OpenCode session registers in its root session's lineage, so subagents share their parent's legs, and the taint survives an OpenCode restart. The plugin classifies tool calls for the monitor and rechecks the final command, URL or path at OpenCode's permission step.
+[`shims/opencode`](shims/opencode/README.md) is the `barmkin-opencode` plugin for OpenCode 2.x, ported from barmkin-mod. Each OpenCode session registers in its root session's lineage, so subagents share their parent's legs, and the taint survives an OpenCode restart. The taint is sticky; only root's opt-in [administrative clear](#administrative-clear-opt-in) lowers it. The plugin classifies tool calls for the monitor and rechecks the final command, URL or path at OpenCode's permission step.
 
 > [!WARNING]
 > This is a partial port. OpenCode 2 has no administrator-locked plugin seat and no managed gate, so a session without the plugin runs unguarded. OpenCode 2 also runs its tools unsandboxed, so the monitor refuses its sessions unless the plugin's `sandboxed` option is set for an OS-sandboxed install. Read [its README](shims/opencode/README.md) for the seat recipe and what it does not cover.
@@ -225,7 +250,7 @@ sudo packaging/install.sh install --client "$USER"   # log in again to take the 
 sudo packaging/install.sh uninstall
 ```
 
-`make managed-install` and `make managed-uninstall` do the same without `--client`. `install` is idempotent. It restarts the monitor cleanly when the binary or unit changes, and it refuses to replace managed settings it did not write. `uninstall` removes everything `install` created.
+`make managed-install` and `make managed-uninstall` do the same without `--client`. `install --admin-socket` also installs the opt-in [administrative socket](#administrative-clear-opt-in), and `install` without it removes the socket. `install` is idempotent. It restarts the monitor cleanly when the binary or unit changes, and it refuses to replace managed settings it did not write. `uninstall` removes everything `install` created.
 
 **NixOS:**
 

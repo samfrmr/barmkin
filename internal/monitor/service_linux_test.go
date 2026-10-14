@@ -29,11 +29,19 @@ const helperEnv = "BARMKIN_MONITOR_TEST_HELPER"
 
 func TestMain(m *testing.M) {
 	if spec := os.Getenv(helperEnv); spec != "" {
-		var paths [3]string
-		if err := json.Unmarshal([]byte(spec), &paths); err != nil {
+		// socket, state directory, client group, and optionally an
+		// administrative socket passed by socket activation, served to
+		// this uid in place of root.
+		var paths []string
+		if err := json.Unmarshal([]byte(spec), &paths); err != nil || len(paths) < 3 {
 			os.Exit(3)
 		}
-		mon, err := Start(Config{Socket: paths[0], StateDir: paths[1], ClientGroup: paths[2]})
+		cfg := Config{Socket: paths[0], StateDir: paths[1], ClientGroup: paths[2]}
+		if len(paths) > 3 {
+			cfg.AdminSocket = paths[3]
+			adminUID = uint32(os.Getuid())
+		}
+		mon, err := Start(cfg)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -98,6 +106,11 @@ func serve(t *testing.T, cfg Config) *running {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return serveStarted(t, m)
+}
+
+func serveStarted(t *testing.T, m *Monitor) *running {
+	t.Helper()
 	ctx, stop := context.WithCancel(context.Background())
 	r := &running{m: m, stop: stop, done: make(chan error, 1)}
 	go func() { r.done <- m.Serve(ctx) }()
@@ -419,7 +432,7 @@ func TestUnsafeJournalIsRefusedUntouched(t *testing.T) {
 // and marks every lineage it knew with monitor_restart.
 func TestKill9(t *testing.T) {
 	cfg := deployment(t)
-	spec, err := json.Marshal([3]string{cfg.Socket, cfg.StateDir, cfg.ClientGroup})
+	spec, err := json.Marshal([]string{cfg.Socket, cfg.StateDir, cfg.ClientGroup})
 	if err != nil {
 		t.Fatal(err)
 	}
