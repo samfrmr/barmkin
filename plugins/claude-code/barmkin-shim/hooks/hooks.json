@@ -1,17 +1,3 @@
 {
-  "description": "Registers each tool call's session_id and tool_use_id with the local barmkin monitor",
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/shim.ts\"",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
+  "modules": ["./register.ts"]
 }

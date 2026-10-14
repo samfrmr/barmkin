@@ -1,8 +1,0 @@
-{
-  "name": "barmkin-shim",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test": "node --test shim.test.ts"
-  }
-}

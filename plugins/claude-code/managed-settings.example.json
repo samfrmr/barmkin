@@ -1,4 +1,13 @@
 {
+  "allowManagedHooksOnly": true,
+  "prependPlugins": ["barmkin-shim@barmkin-local", "cc-plugin-sec-default@builtin"],
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "bwrapPath": "/usr/bin/bwrap",
+    "socatPath": "/usr/bin/socat"
+  },
   "env": {
     "BARMKIN_MONITOR_SOCKET": "/run/barmkin/monitor.sock"
   },

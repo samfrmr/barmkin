@@ -165,14 +165,16 @@ kill -9 %1; /tmp/barmkin-monitor serve -socket /tmp/bm.sock -journal /tmp/bm.jou
 
 ## Claude Code managed gate (demo)
 
-This is a minimal demo of strict per-call shim presence for a managed Claude Code seat. Two hooks run on every tool call:
+This is a minimal demo of strict per-call shim presence for a managed Claude Code seat, under the full managed lock. Two pieces run on every tool call:
 
-- **Shim plugin** (`plugins/claude-code/barmkin-shim`). Its PreToolUse hook (`node shim.ts`) sends the call's `session_id` and `tool_use_id` to the monitor (`POST /v1/register`). It always exits 0 and never blocks anything.
+- **Shim plugin** (`plugins/claude-code/barmkin-shim`). A hooks module (`hooks/register.ts`) on the `session.append` event. When the model's response is added to the conversation, it sends each tool call's `tool_use_id`, with the session id, to the monitor (`POST /v1/register`). That happens before Claude Code starts the call. The shim never blocks anything.
 - **Managed gate** (`barmkin gate`). A PreToolUse hook in managed settings, so the user cannot remove it. It asks the monitor whether that exact call was registered (`POST /v1/presence`) and exits 0 only if it was.
 
 A session without the shim, or with a broken one, can therefore run no tools. Both requests are versioned and content-free: they never carry the tool name, the tool input or the prompt.
 
-Claude Code runs matching hooks in parallel, so the shim's registration can land just after the gate starts. The gate keeps asking for up to 1.5 seconds while the answer is `unregistered`. Every other answer is final.
+The shim has to be a hooks module. Claude Code 2.1.x runs the managed PreToolUse hook before any plugin hook, and a managed deny is final. So a shim written as a plugin PreToolUse command hook never registers a call in time, and the gate denies every call. Managed `prependPlugins` also skips a plugin that has no hooks module. The live lab below shows both.
+
+The shim's registration normally lands before the gate starts, but its request can still be in flight. So the gate keeps asking for up to 1.5 seconds while the answer is `unregistered`. Every other answer is final. The shim gives up on a registration after 1 second.
 
 The gate exits 2, writing its reason and the v1 response to stderr, for any of these:
 
@@ -185,9 +187,9 @@ The gate exits 2, writing its reason and the v1 response to stderr, for any of t
 
 A panic inside the gate also denies, with exit 2.
 
-Claude Code treats a hook timeout, and any exit code other than 0 or 2, as a non-blocking error and runs the tool anyway. So the gate never exits with any other code, and its 3-second deadline sits well inside the 10-second hook timeout in the recipe. `go test` checks the shipped recipe against the deadline.
+Claude Code treats a hook timeout, and any exit code other than 0 or 2, as a non-blocking error and runs the tool anyway. So the gate never exits with any other code, and its 3-second deadline sits well inside the 10-second hook timeout in the recipe. `go test` checks the shipped recipe against the deadline, and checks that it keeps the full lock.
 
-This demo does not clear taints, rotate epochs or package anything, and it changes no host settings. The monitor socket is owner-only, so any process running as the same user can register calls. The demo shows that the shim is present on every call. It does not stop a same-user process from forging a registration.
+This demo does not clear taints, rotate epochs or package anything, and it changes no host settings. The monitor socket is owner-only. Under the lock, sandboxed Bash commands cannot open it. Any other process running as the same user still can, so the demo does not stop such a process from forging a registration.
 
 ### Lab fixture
 
@@ -195,7 +197,7 @@ This demo does not clear taints, rotate epochs or package anything, and it chang
 ./scripts/claude-gate-demo.sh     # or: make claude-gate-demo
 ```
 
-The script builds `barmkin` and `barmkin-monitor` into a temporary directory and starts the monitor there. For each simulated tool call it feeds one PreToolUse input to `barmkin gate`. When the shim is "loaded", it also runs the plugin's own hook command from `hooks/hooks.json` on the same input, in parallel, as Claude Code does. It checks every exit code and reason:
+The script builds `barmkin` and `barmkin-monitor` into a temporary directory and starts the monitor there. For each simulated tool call it feeds one PreToolUse input to `barmkin gate`. When the shim is "loaded", the script registers the same call as the shim does (`barmkin-monitor send` to `/v1/register`), with the request still in flight as the gate starts. It checks every exit code and reason:
 
 - Without the shim, a call is denied.
 - With the shim, a call is allowed, and the same call replayed or sent from another session is denied.
@@ -203,15 +205,34 @@ The script builds `barmkin` and `barmkin-monitor` into a temporary directory and
 - An expired registration, malformed hook input, a gate with no socket, and a `SIGKILL`ed monitor are all denied.
 - After a restart, calls are allowed again.
 
-`go test .` runs this script and the shim's TypeScript tests. To run the TypeScript tests on their own, use `make shim-test`, or `node --test shim.test.ts` in the plugin directory. The shim needs Node 22.18+ or 23.6+, which run `.ts` files directly.
+`go test .` runs this script and the shim module's tests. To run the shim tests on their own, use `make shim-test`, or `node --test barmkin-shim.test.ts` in `plugins/claude-code`. They need Node 22.18+ or 23.6+, which run `.ts` files directly. The shim itself runs inside Claude Code and needs no Node.
+
+### Live lab under the full lock
+
+```bash
+./scripts/claude-lock-lab.sh     # or: make claude-lock-lab, or BARMKIN_CLAUDE_LAB=1 go test -run TestClaudeLockLab .
+```
+
+The script runs about thirty real `claude -p` sessions (Claude Code 2.1.x) against a scripted local model. Each runs in a private mount namespace (bubblewrap) where the recipe's paths exist: the recipe itself at `/etc/claude-code/managed-settings.json`, unchanged, plus `/usr/local/bin/barmkin`, `/opt/barmkin/plugins/claude-code` and `/run/barmkin/monitor.sock`. It writes nothing outside a temporary directory. It needs `claude`, `go`, `node`, `bwrap`, `socat`, unprivileged user namespaces and an existing `/etc/claude-code` directory to mount over. If any is missing it exits 77.
+
+It checks, under the full lock:
+
+- Single, parallel and subagent tool calls are registered and allowed.
+- None of these changes the command that runs: user, project, local and `--settings` PreToolUse hooks that rewrite it; a `--plugin-dir` or `CLAUDE_CODE_PLUGIN_DIRS` mod, or a user-installed plugin, that rewrites it and overturns the gate's re-check at `tool.check`; user settings that redefine the `barmkin-local` marketplace or disable the shim. The user hooks and mods are never loaded.
+- A sandboxed command cannot reach the monitor socket to forge a registration.
+- A plugin-state file that points the shim at a user-writable copy, and `--safe-mode`, stop the shim loading, so every call is denied.
+- With the monitor down, every call is denied, including under `disableAllHooks`, `bypassPermissions` and `--bare`.
+
+It also runs controls without the lock. There, the same hooks, mods and plugins do change the command that runs, and an unsandboxed command can register calls. A shim written as a plugin PreToolUse command hook gets every call denied, with or without the lock.
 
 ### Managed-settings recipe for the dedicated demo VM
 
 These steps are for the dedicated demo VM only. Nothing in this repository applies them.
 
-1. Install the binaries and the plugin marketplace:
+1. Install the sandbox helpers, the binaries and the plugin marketplace:
 
    ```bash
+   sudo apt-get install -y bubblewrap socat
    go build -o barmkin . && go build -o barmkin-monitor ./cmd/barmkin-monitor
    sudo install -m 0755 barmkin barmkin-monitor /usr/local/bin/
    sudo mkdir -p /opt/barmkin/plugins && sudo cp -r plugins/claude-code /opt/barmkin/plugins/
@@ -224,13 +245,16 @@ These steps are for the dedicated demo VM only. Nothing in this repository appli
    barmkin-monitor serve -socket /run/barmkin/monitor.sock -journal ~/.barmkin/taint.journal
    ```
 
-3. Install [`plugins/claude-code/managed-settings.example.json`](plugins/claude-code/managed-settings.example.json) as `/etc/claude-code/managed-settings.json` (owned by root, mode `0644`). It sets up:
+3. Install [`plugins/claude-code/managed-settings.example.json`](plugins/claude-code/managed-settings.example.json) as `/etc/claude-code/managed-settings.json` (owned by root, mode `0644`). It sets up the full lock:
+   - `allowManagedHooksOnly: true`: only managed hooks and managed plugins' hooks modules run. User, project, local and `--settings` hooks, `--plugin-dir` mods and user-installed plugins are not loaded. This also switches off any other settings hooks on the VM.
+   - `prependPlugins`: seats `barmkin-shim@barmkin-local` and then `cc-plugin-sec-default@builtin`. Keep the security default listed, by that exact id: leaving it out unseats it.
+   - `extraKnownMarketplaces` and `enabledPlugins`: declare the local `barmkin-local` marketplace at `/opt/barmkin/plugins/claude-code` and turn on `barmkin-shim@barmkin-local`, which makes the shim a managed plugin.
+   - `sandbox`: `enabled`, `failIfUnavailable` and `allowUnsandboxedCommands: false`, with `bwrapPath` and `socatPath` pinned to `/usr/bin` (only managed settings can set these). Sandboxed commands cannot open the monitor socket. Never set `network.allowAllUnixSockets`.
    - `hooks.PreToolUse`: the gate with matcher `*`, `-socket /run/barmkin/monitor.sock`, and `timeout: 10` (seconds).
    - `env.BARMKIN_MONITOR_SOCKET`: tells the shim where the monitor is.
-   - `extraKnownMarketplaces` and `enabledPlugins`: declare the local `barmkin-local` marketplace at `/opt/barmkin/plugins/claude-code` and turn on `barmkin-shim@barmkin-local`.
 
-   Do not set `allowManagedHooksOnly`. It also stops plugin hooks, so the shim would never register a call and the gate would deny everything.
+4. Start `claude` as the demo user and confirm that tool calls run. To see the deny path, stop the monitor, or set `enabledPlugins."barmkin-shim@barmkin-local"` to `false` in the managed settings. Every tool call is then denied with the reason from the gate. Turning the shim off in user settings does not work: the managed setting wins.
 
-4. Start `claude` as the demo user and confirm that tool calls run. To see the deny path, set `enabledPlugins."barmkin-shim@barmkin-local"` to `false`, or stop the monitor. Every tool call is then denied with the reason from the gate.
+The lock holds against the demo user's own settings, mods and plugins. It does not hold against root, who can rewrite the managed settings.
 
 `claude plugin validate plugins/claude-code` checks the marketplace and plugin manifests.

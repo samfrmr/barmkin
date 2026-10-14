@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -149,7 +150,7 @@ func TestGateDeniesUnregisteredCall(t *testing.T) {
 	}
 }
 
-func TestGateWaitsForParallelShim(t *testing.T) {
+func TestGateWaitsForLateRegistration(t *testing.T) {
 	shortGateTimes(t)
 	sock := startMonitor(t, monitor.PresenceTTL)
 	go func() {
@@ -357,15 +358,13 @@ func TestGateDeadlineUnderHookTimeouts(t *testing.T) {
 }
 
 // TestClaudeGateDemo runs scripts/claude-gate-demo.sh, which builds both
-// commands and drives the shim plugin's hook and the gate together.
+// commands and drives shim-style registrations and the gate together.
 func TestClaudeGateDemo(t *testing.T) {
 	if testing.Short() {
-		t.Skip("builds and runs the monitor, gate and shim as subprocesses")
+		t.Skip("builds and runs the monitor and gate as subprocesses")
 	}
-	for _, tool := range []string{"bash", "node"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s not available", tool)
-		}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
 	}
 	out, err := exec.Command("bash", "scripts/claude-gate-demo.sh").CombinedOutput()
 	t.Logf("demo output:\n%s", out)
@@ -374,16 +373,127 @@ func TestClaudeGateDemo(t *testing.T) {
 	}
 }
 
-// TestShimTypeScript runs the shim plugin's own node:test suite.
+// TestClaudeLockLab runs scripts/claude-lock-lab.sh, the live Claude Code
+// lab for the full managed lock. It needs claude 2.1.x, bwrap, socat and
+// user namespaces, and takes about half a minute, so it runs only when
+// BARMKIN_CLAUDE_LAB=1.
+func TestClaudeLockLab(t *testing.T) {
+	if os.Getenv("BARMKIN_CLAUDE_LAB") != "1" {
+		t.Skip("set BARMKIN_CLAUDE_LAB=1 to run the live Claude Code lab")
+	}
+	out, err := exec.Command("bash", "scripts/claude-lock-lab.sh").CombinedOutput()
+	t.Logf("lab output:\n%s", out)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 77 {
+		t.Skip("lab prerequisites missing")
+	}
+	if err != nil {
+		t.Fatalf("lab failed: %v", err)
+	}
+}
+
+// TestShimTypeScript runs the shim hooks module's node:test suite.
 func TestShimTypeScript(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not available")
 	}
-	cmd := exec.Command("node", "--test", "shim.test.ts")
-	cmd.Dir = "plugins/claude-code/barmkin-shim"
+	cmd := exec.Command("node", "--test", "barmkin-shim.test.ts")
+	cmd.Dir = "plugins/claude-code"
 	out, err := cmd.CombinedOutput()
 	t.Logf("node --test output:\n%s", out)
 	if err != nil {
 		t.Fatalf("shim tests failed: %v", err)
+	}
+}
+
+// TestManagedRecipeFullLock pins the full managed lock in the shipped
+// recipe and the shape of the shim that lets it run under that lock. Under
+// allowManagedHooksOnly, Claude Code 2.1.x runs only managed hooks and
+// managed plugins' hooks modules; prependPlugins skips a listed plugin that
+// has no hooks module, and a plugin's command hooks run only after the
+// managed gate has already denied. scripts/claude-lock-lab.sh shows all of
+// this in a live session.
+func TestManagedRecipeFullLock(t *testing.T) {
+	data, err := os.ReadFile("plugins/claude-code/managed-settings.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		AllowManagedHooksOnly *bool    `json:"allowManagedHooksOnly"`
+		PrependPlugins        []string `json:"prependPlugins"`
+		Sandbox               struct {
+			Enabled                  *bool  `json:"enabled"`
+			FailIfUnavailable        *bool  `json:"failIfUnavailable"`
+			AllowUnsandboxedCommands *bool  `json:"allowUnsandboxedCommands"`
+			BwrapPath                string `json:"bwrapPath"`
+			SocatPath                string `json:"socatPath"`
+			Network                  struct {
+				AllowAllUnixSockets *bool `json:"allowAllUnixSockets"`
+			} `json:"network"`
+		} `json:"sandbox"`
+		Env                    map[string]string `json:"env"`
+		EnabledPlugins         map[string]bool   `json:"enabledPlugins"`
+		ExtraKnownMarketplaces map[string]struct {
+			Source struct {
+				Source string `json:"source"`
+				Path   string `json:"path"`
+			} `json:"source"`
+		} `json:"extraKnownMarketplaces"`
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatal(err)
+	}
+	const shim = "barmkin-shim@barmkin-local"
+	if s.AllowManagedHooksOnly == nil || !*s.AllowManagedHooksOnly {
+		t.Error("allowManagedHooksOnly must be true")
+	}
+	if want := []string{shim, "cc-plugin-sec-default@builtin"}; strings.Join(s.PrependPlugins, ",") != strings.Join(want, ",") {
+		t.Errorf("prependPlugins %q, want %q (sec-default must stay listed)", s.PrependPlugins, want)
+	}
+	if !s.EnabledPlugins[shim] {
+		t.Errorf("enabledPlugins does not enable %s", shim)
+	}
+	if m := s.ExtraKnownMarketplaces["barmkin-local"].Source; m.Source != "directory" || !strings.HasPrefix(m.Path, "/") {
+		t.Errorf("barmkin-local marketplace %+v, want an absolute directory", m)
+	}
+	sb := s.Sandbox
+	if sb.Enabled == nil || !*sb.Enabled || sb.FailIfUnavailable == nil || !*sb.FailIfUnavailable ||
+		sb.AllowUnsandboxedCommands == nil || *sb.AllowUnsandboxedCommands {
+		t.Errorf("sandbox %+v, want enabled, failIfUnavailable, no unsandboxed commands", sb)
+	}
+	if !strings.HasPrefix(sb.BwrapPath, "/") || !strings.HasPrefix(sb.SocatPath, "/") {
+		t.Errorf("sandbox bwrapPath %q and socatPath %q must be absolute", sb.BwrapPath, sb.SocatPath)
+	}
+	if sb.Network.AllowAllUnixSockets != nil && *sb.Network.AllowAllUnixSockets {
+		t.Error("sandbox must not allow all Unix sockets: sandboxed commands could forge registrations")
+	}
+	sock := s.Env[envMonitorSocket]
+	gateCmd := ""
+	for _, g := range s.Hooks["PreToolUse"] {
+		for _, h := range g.Hooks {
+			if strings.Contains(h.Command, "barmkin gate") {
+				gateCmd = h.Command
+			}
+		}
+	}
+	if sock == "" || !strings.HasSuffix(gateCmd, "-socket "+sock) {
+		t.Errorf("shim socket %q and gate command %q disagree", sock, gateCmd)
+	}
+
+	hooksJSON, err := os.ReadFile("plugins/claude-code/barmkin-shim/hooks/hooks.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h map[string]json.RawMessage
+	if err := json.Unmarshal(hooksJSON, &h); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h["modules"]; !ok || len(h) != 1 {
+		t.Errorf("shim hooks.json %s must name only a hooks module", hooksJSON)
 	}
 }

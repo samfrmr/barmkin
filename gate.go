@@ -1,11 +1,12 @@
 // Gate is the managed Claude Code PreToolUse check for shim presence.
 //
 // A managed-settings PreToolUse hook runs `barmkin gate` on every tool
-// call. The barmkin shim plugin registers the same call with the local
-// monitor (POST /v1/register); the gate asks the monitor whether that
-// registration is live (POST /v1/presence) and allows the call only if it
-// is. So a session whose shim is missing, disabled, or broken cannot run
-// any tool.
+// call. The barmkin shim plugin, a hooks module, registers the same call
+// with the local monitor (POST /v1/register) as the model's tool_use block
+// is appended to the conversation, before the call starts; the gate asks
+// the monitor whether that registration is live (POST /v1/presence) and
+// allows the call only if it is. So a session whose shim is missing,
+// disabled, or broken cannot run any tool.
 //
 // Both requests are versioned and content-free: they carry only Claude
 // Code's session_id and tool_use_id, never the tool name or input.
@@ -117,8 +118,8 @@ func gateDecide(ctx context.Context, start time.Time, args []string, stdin io.Re
 		return deny(monitor.ReasonMalformedRequest)
 	}
 
-	// Claude Code runs the managed gate and the shim's hook in parallel,
-	// so the registration may land just after the gate starts. Keep asking
+	// The shim registers the call before Claude Code starts it, but its
+	// request can still be in flight when the gate starts. Keep asking
 	// while the answer is "unregistered" and the wait lasts; every other
 	// answer is final.
 	client := monitor.NewClient(*socket, gateTimes.request)
