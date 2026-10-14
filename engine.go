@@ -60,7 +60,9 @@ func (e *Engine) evaluate(input []byte) HookOutput {
 }
 
 // record writes the decision to the audit log and/or OTel exporter.
-// Called once per evaluation. Content is truncated for log readability.
+// Called once per evaluation. Content is redacted, then truncated for
+// log readability. Redacting first means a secret that straddles the
+// truncation point never leaves a prefix behind in the log.
 func (e *Engine) record(req Request, result HookOutput, content string, start time.Time) {
 	elapsed := time.Since(start)
 
@@ -72,7 +74,7 @@ func (e *Engine) record(req Request, result HookOutput, content string, start ti
 		Reason:       result.Reason,
 		DurationMs:   float64(elapsed.Microseconds()) / 1000.0,
 		Rule:         result.Rule,
-		Content:      truncate(content, 80),
+		Content:      truncate(redactSecrets(content, e.cfg.Rules), 80),
 		Agent:        req.AgentID,
 	}
 
@@ -94,4 +96,16 @@ func (e *Engine) close() {
 	if e.log != nil {
 		e.log.Close()
 	}
+}
+
+// redactSecrets replaces every match of a secret rule in s with
+// "[REDACTED:<rule>]". The rules come from the loaded config, so a
+// secret rule added there is redacted from the log as well as blocked.
+func redactSecrets(s string, rules []Rule) string {
+	for _, r := range rules {
+		if r.Secret {
+			s = r.regex.ReplaceAllLiteralString(s, "[REDACTED:"+r.Name+"]")
+		}
+	}
+	return s
 }

