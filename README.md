@@ -38,6 +38,7 @@ The plugin at `plugins/barmkin.ts` spawns `barmkin eval` on every `tool.execute.
 ```
 barmkin eval       stdin in, exit 0 or exit 2
 barmkin gate       managed Claude Code shim-presence check, exit 0 or exit 2
+barmkin monitor    run the monitor service (see "Monitor core" below)
 barmkin test       run deny/allow test vectors
 barmkin validate   check config, rules, examples
 barmkin stats      aggregate from log file
@@ -121,6 +122,33 @@ otel:
   endpoint: "localhost:4317"
   service: "barmkin"
 ```
+
+## Monitor core (`barmkin monitor`)
+
+`barmkin monitor` is the successor's monitor service (`internal/monitor`). It serves the versioned shim-monitor contract in `internal/proto` (HTTP POST of JSON to `/v1/<op>` on a Unix socket) and keeps each session's taint in a crash-safe journal (`internal/journal`). No shim, gate or installer uses it yet; `barmkin eval`, `barmkin gate` and `install.sh` are unchanged.
+
+```
+barmkin monitor [-socket /run/barmkin/monitor.sock] [-state-dir /var/lib/barmkin]
+                [-client-group barmkin-clients] [-preregister-ttl 10s]
+```
+
+**Deployment.** Root installs and manages the monitor, which runs as a dedicated service user, for example under a systemd unit with `User=`, `StateDirectory=` and `RuntimeDirectory=`. Root creates both directories. The monitor refuses to start when:
+- it is running as root;
+- the state directory is not owned by the service user with mode `0700` or tighter;
+- the runtime directory is not owned by the service user with mode `0750` or tighter;
+- any directory above either one is writable by someone other than root or the service user;
+- a path component is a symlink.
+
+The journal is `0600`. The socket is `0660`, group `barmkin-clients`. The service user and every user whose agents connect must be members of that group. The monitor reads each connection's peer credentials (`SO_PEERCRED`) and drops any connection it cannot identify. A client's uid is part of every session key, so one user cannot see or change another user's sessions.
+
+**Sessions and taint.** Each session belongs to a root lineage, and the lineage holds two legs, untrusted and sensitive. Legs only rise, and the first source to raise a leg stays. There is no clear, rotate or capability operation.
+- `register` refuses a host whose sandbox is off or allows every Unix socket (`posture_refused`).
+- A new lineage starts clean only for a fresh top-level session. Any other new lineage starts with its untrusted leg raised by `unknown_session`.
+- Every operation on an unregistered session fails with `unknown_session`, which clients treat as a deny.
+- `decide` follows barmkin-mod's egress postures: the untrusted leg denies the deny classes and warns on the rest, both legs deny everything, and a clean session warns only on destructive classes.
+- The core has no classifier. `screen` raises the untrusted leg for the content's source and answers `unavailable`.
+
+**Journal.** A leg raise or registration is fsynced before the request is answered. At every start the monitor replays the journal and rewrites it as a compact snapshot. If the last run did not stop cleanly (a crash, `SIGKILL`, a torn tail or a damaged record), every known lineage gets its untrusted leg raised by `monitor_restart`. A damaged journal is moved aside as `journal.damaged-<time>`, and only its valid records are replayed. A private regular journal that cannot be read or is over the size limit is moved aside the same way and every session starts unknown. A symlink, a non-regular file, or a journal with the wrong owner or mode is never moved, and the monitor refuses to start. A deleted journal leaves every session unknown, so it denies until it registers again. If a change cannot be journaled, `health` reports `degraded` and every other operation fails `unavailable`.
 
 ## Local monitor (foundation)
 
