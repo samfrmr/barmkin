@@ -239,6 +239,39 @@ describe('taint only narrows', () => {
     assert.deepEqual(await legs(m, session), tainted)
   })
 
+  test('legs only rise and keep their first source, with no operation or restart that clears them', async (t) => {
+    const m = await monitor(t)
+    const cc = await launch(m)
+    const session = cc.sessionId
+    await taint(cc)
+    assert.equal((await cc.use('Bash', { command: 'cat ~/.aws/credentials' })).gate.code, 0)
+    const up: Legs = { untrusted: 'fetch', sensitive: 'credential' }
+    assert.deepEqual(await legs(m, session), up)
+
+    for (const f of fixtures) {
+      if (f.op === 'health') continue
+      for (const c of f.valid) {
+        if (c.message !== 'request') continue
+        await m.send(f.op, JSON.stringify({ ...(c.body as object), session }))
+        assert.deepEqual(await legs(m, session), up, f.op + ': ' + c.name)
+      }
+    }
+    for (const source of ['mcp', 'skill', 'read', 'peer', 'invisible']) {
+      await m.send('observe', JSON.stringify({ ...scoped(session), source }))
+      assert.deepEqual(await legs(m, session), up, 'observe ' + source)
+    }
+    for (const path of ['/v1/clear', '/v1/clear_taint', '/v1/capability']) {
+      assert.equal((await m.send(path, JSON.stringify(scoped(session)))).status, 400, path)
+    }
+
+    assert.equal(await m.stop(), 0, m.output)
+    await m.serve()
+    assert.deepEqual(await legs(m, session), up, 'a clean restart')
+    await m.kill()
+    await m.serve()
+    assert.deepEqual(await legs(m, session), { untrusted: 'fetch', sensitive: 'credential' }, 'a crash restart')
+  })
+
   test('both legs up deny every egress class (the Rule of Two)', async (t) => {
     const m = await monitor(t)
     const cc = await launch(m)
