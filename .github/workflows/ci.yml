@@ -83,6 +83,47 @@ jobs:
       - name: claude plugin test
         run: npm test
 
+  # The OpenCode 2.x shim (shims/opencode), on the Bun that OpenCode 2.0.28
+  # embeds: its type check, and its suite against a model of the OpenCode
+  # host, the in-memory monitor and a real `barmkin monitor` built here.
+  # Strict, so a missing module or binary fails rather than skips.
+  opencode-shim:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: shims/opencode
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install the pinned TypeScript
+        run: npm ci
+
+      - name: tsc
+        run: npm run typecheck
+
+      - name: Build barmkin
+        working-directory: .
+        run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/barmkin" .
+
+      - name: bun test
+        env:
+          BARMKIN_CONTRACT_STRICT: "1"
+        run: BARMKIN_TEST_BIN="$RUNNER_TEMP/barmkin" bun test
+
   # packaging/install.sh on a clean Ubuntu 24.04, booted with systemd in a
   # privileged container: install, the checks in packaging/test/checks.sh,
   # a second install that changes nothing, and uninstall twice.

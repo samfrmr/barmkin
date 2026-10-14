@@ -1,0 +1,5 @@
+# Bun 1.4.2 is the runtime embedded in OpenCode 2.0.28, the version this shim
+# is tested on. `root` is the suite in tests/ (*.spec.ts, so `claude plugin
+# test` never picks these Bun-only files up); a bare `bun test` here runs it.
+[test]
+root = "./tests"
