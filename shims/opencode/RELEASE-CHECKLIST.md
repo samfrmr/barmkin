@@ -74,7 +74,7 @@ Suites:
 - [ ] Any change to the fixed wording needs captain approval. Only `<git-sha>` and `<per-seat gaps>` may vary between releases.
 - [ ] Repeat in each seat the release claims (inline-config seat with and without the allowlist and project config off) and confirm the `not covered:` list names the gaps for that seat.
 - [ ] Remove the seat and start again: confirm **no** posture line appears.
-- [ ] `shims/opencode/README.md` still carries the section 2.2 wording verbatim (`tests/docs-contract.spec.ts` checks this).
+- [ ] `shims/opencode/README.md` still carries the re-scout section 2.2 wording verbatim, including "No posture line means no guard" and the unsandboxed-refusal paragraph (checked by hand; no test covers it).
 
 ## 4. Sign-off
 
