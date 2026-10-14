@@ -7,7 +7,10 @@
 # client included) and recovery after SIGKILL. It then checks that switching
 # to the same configuration changes nothing, that switching to one without
 # the module (twice) leaves nothing but the state directory, and that
-# switching back installs it again.
+# switching back installs it again. It also checks that there is no
+# administrative socket by default, that services.barmkin.adminSocket.enable
+# adds a root-only one whose clear works only from a terminal, and that
+# switching back takes it away.
 { pkgs ? import <nixpkgs> { } }:
 
 pkgs.testers.runNixOSTest {
@@ -23,18 +26,32 @@ pkgs.testers.runNixOSTest {
     users.users.mallory.isNormalUser = true;
     environment.systemPackages = [ pkgs.curl pkgs.socat pkgs.nodejs_24 ];
     specialisation.uninstalled.configuration.services.barmkin.enable = lib.mkForce false;
+    specialisation.admin.configuration.services.barmkin.adminSocket.enable = true;
   };
 
   testScript = ''
     checks = "bash ${../test/checks.sh}"
     installed = "/run/booted-system/bin/switch-to-configuration test"
     uninstalled = "/run/booted-system/specialisation/uninstalled/bin/switch-to-configuration test"
+    admin = "/run/booted-system/specialisation/admin/bin/switch-to-configuration test"
 
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("barmkin-monitor.service")
 
     with subtest("installed"):
         print(machine.succeed(f"{checks} installed alice mallory"))
+        print(machine.succeed(f"{checks} no-admin"))
+
+    with subtest("administrative socket, opted in"):
+        machine.succeed(admin)
+        machine.wait_for_unit("barmkin-monitor.service")
+        print(machine.succeed(f"{checks} admin alice mallory"))
+        print(machine.succeed(f"{checks} installed alice mallory"))
+
+    with subtest("administrative socket, opted out"):
+        machine.succeed(installed)
+        machine.wait_for_unit("barmkin-monitor.service")
+        print(machine.succeed(f"{checks} no-admin"))
 
     with subtest("switching again changes nothing"):
         before = machine.succeed(f"{checks} fingerprint")

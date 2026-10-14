@@ -177,6 +177,23 @@ func TestInvalidRecordsAreDamage(t *testing.T) {
 		{Kind: KindRaise, Host: proto.HostOpenCode, Root: "s", Leg: LegSensitive, Source: proto.SourceFetch},
 		{Kind: KindRaise, Host: proto.HostOpenCode, Root: "s", Leg: LegUntrusted, Source: proto.SourceCredential},
 		{Kind: KindRaise, Host: proto.HostOpenCode, Session: "s", Root: "s", Leg: LegUntrusted, Source: proto.SourceMCP},
+		{Kind: KindRaise, Host: proto.HostOpenCode, Root: "s", Leg: LegUntrusted, Source: proto.SourceMCP, Epoch: 1},
+		{Kind: KindRaise, Host: proto.HostOpenCode, Root: "s", Leg: LegUntrusted, Source: proto.SourceMCP, Reason: ReasonFalsePositive},
+		{Kind: KindRaise, Host: proto.HostOpenCode, Root: "s", Leg: LegUntrusted, Source: proto.SourceMCP, At: -1},
+		{Kind: KindRegister, Host: proto.HostOpenCode, Session: "s", Root: "s", Reason: ReasonReviewedSafe},
+		{Kind: KindStart, At: 1},
+		{Kind: KindShutdown, Epoch: 1},
+		// A clear names one lineage, the epoch it begins, a closed reason
+		// and when, and nothing else.
+		{Kind: KindClear, Host: proto.HostClaudeCode, Root: "s", Epoch: 1, At: 1},
+		{Kind: KindClear, Host: proto.HostClaudeCode, Root: "s", Epoch: 1, Reason: "user asked", At: 1},
+		{Kind: KindClear, Host: proto.HostClaudeCode, Root: "s", Epoch: 0, Reason: ReasonFalsePositive, At: 1},
+		{Kind: KindClear, Host: proto.HostClaudeCode, Root: "s", Epoch: 1, Reason: ReasonFalsePositive},
+		{Kind: KindClear, Host: proto.HostClaudeCode, Root: "", Epoch: 1, Reason: ReasonFalsePositive, At: 1},
+		{Kind: KindClear, Host: proto.HostClaudeCode, Session: "s", Root: "s", Epoch: 1, Reason: ReasonFalsePositive, At: 1},
+		{Kind: KindClear, Host: proto.HostClaudeCode, Root: "s", Leg: LegUntrusted, Epoch: 1, Reason: ReasonFalsePositive, At: 1},
+		{Kind: KindClear, Host: proto.HostClaudeCode, Root: "s", Source: proto.SourceMCP, Epoch: 1, Reason: ReasonFalsePositive, At: 1},
+		{Kind: KindClear, Host: "copilot", Root: "s", Epoch: 1, Reason: ReasonFalsePositive, At: 1},
 	}
 	for _, r := range bad {
 		if _, err := encode([]Record{r}, 1); err == nil {
@@ -279,5 +296,32 @@ func TestSourcesMatchProto(t *testing.T) {
 				t.Errorf("leg %s source %s: journal %v, wire %v", leg, s, SourceFits(leg, s), wireOK)
 			}
 		}
+	}
+}
+
+// A clear is appended after the raises it lowers, which stay in the journal,
+// and records from before epochs and times existed still read.
+func TestClearAndHistoryRoundTrip(t *testing.T) {
+	path := journalPath(t)
+	records := append(slices.Clone(sample),
+		Record{Kind: KindClear, UID: 1000, Host: proto.HostClaudeCode, Root: "sess-a", Epoch: 1, Reason: ReasonFalsePositive, At: 1_800_000_000},
+		Record{Kind: KindRegister, UID: 1000, Host: proto.HostClaudeCode, Session: "sess-a", Root: "sess-a", Epoch: 1, At: 1_800_000_001},
+		Record{Kind: KindRaise, UID: 1000, Host: proto.HostClaudeCode, Root: "sess-a", Leg: LegUntrusted, Source: proto.SourceMCP, At: 1_800_000_002},
+		Record{Kind: KindShutdown},
+	)
+	j := mustCreate(t, path, records[:len(sample)])
+	if err := j.Append(records[len(sample):]...); err != nil {
+		t.Fatal(err)
+	}
+	res := mustLoad(t, path)
+	if !res.Clean || !slices.Equal(kinds(res.Records), records) {
+		t.Fatalf("read back %+v (clean %v)", res.Records, res.Clean)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line := bytes.SplitAfter(data, []byte{'\n'})[1]; bytes.Contains(line, []byte(`"epoch"`)) || bytes.Contains(line, []byte(`"at"`)) {
+		t.Errorf("a record without an epoch or time still writes them: %s", line)
 	}
 }

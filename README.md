@@ -39,6 +39,8 @@ The plugin at `plugins/barmkin.ts` spawns `barmkin eval` on every `tool.execute.
 barmkin eval       stdin in, exit 0 or exit 2
 barmkin gate       managed Claude Code shim-presence check, exit 0 or exit 2
 barmkin monitor    run the monitor service (see "Monitor core" below)
+barmkin monitor-admin list|clear
+                   root only: list monitor lineages, or clear one (see "Administrative clear (opt-in)")
 barmkin test       run deny/allow test vectors
 barmkin validate   check config, rules, examples
 barmkin stats      aggregate from log file
@@ -130,6 +132,7 @@ otel:
 ```
 barmkin monitor [-socket /run/barmkin/monitor.sock] [-state-dir /var/lib/barmkin]
                 [-client-group barmkin-clients] [-preregister-ttl 10s]
+                [-admin-socket /run/barmkin-admin/admin.sock]
 ```
 
 **Deployment.** Root installs and manages the monitor, which runs as a dedicated service user under a systemd unit with `User=`, `StateDirectory=` and `RuntimeDirectory=`. [`packaging/`](#packaging-the-managed-monitor-and-claude-code-seat) ships the unit. Root creates both directories. The monitor refuses to start when:
@@ -141,7 +144,7 @@ barmkin monitor [-socket /run/barmkin/monitor.sock] [-state-dir /var/lib/barmkin
 
 The journal is `0600`. The socket is `0660`, group `barmkin-clients`. The service user and every user whose agents connect must be members of that group. The monitor reads each connection's peer credentials (`SO_PEERCRED`) and drops any connection it cannot identify. A client's uid is part of every session key, so one user cannot see or change another user's sessions.
 
-**Sessions and taint.** Each session belongs to a root lineage, and the lineage holds two legs, untrusted and sensitive. Legs only rise, and the first source to raise a leg stays. There is no clear, rotate or capability operation.
+**Sessions and taint.** Each session belongs to a root lineage, and the lineage holds two legs, untrusted and sensitive. Legs only rise, and the first source to raise a leg stays. Nothing a client sends lowers a leg: the shim contract has no clear, rotate or capability operation. The only way down is root's [administrative clear](#administrative-clear-opt-in), which is off by default.
 - `register` refuses a host whose sandbox is off or allows every Unix socket (`posture_refused`).
 - A new lineage starts clean only for a fresh top-level session. Any other new lineage starts with its untrusted leg raised by `unknown_session`.
 - Every operation on an unregistered session fails with `unknown_session`, which clients treat as a deny.
@@ -154,7 +157,30 @@ The journal is `0600`. The socket is `0660`, group `barmkin-clients`. The servic
 - Answers are cached for 24 hours in a bounded cache. Failures are never cached, the cache has no query endpoint, and the shadow screen uses its own namespace.
 - Golden tests replay barmkin-mod's TypeScript against recorded mock Jev responses. No test calls Jev.
 
-**Journal.** A leg raise or registration is fsynced before the request is answered. At every start the monitor replays the journal and rewrites it as a compact snapshot. If the last run did not stop cleanly (a crash, `SIGKILL`, a torn tail or a damaged record), every known lineage gets its untrusted leg raised by `monitor_restart`. A damaged journal is moved aside as `journal.damaged-<time>`, and only its valid records are replayed. A private regular journal that cannot be read or is over the size limit is moved aside the same way and every session starts unknown. A symlink, a non-regular file, or a journal with the wrong owner or mode is never moved, and the monitor refuses to start. A deleted journal leaves every session unknown, so it denies until it registers again. If a change cannot be journaled, `health` reports `degraded` and every other operation fails `unavailable`.
+**Journal.** A leg raise, registration or administrative clear is fsynced before the request is answered. At every start the monitor replays the journal and rewrites it as a compact snapshot, which keeps every cleared raise and every clear. If the last run did not stop cleanly (a crash, `SIGKILL`, a torn tail or a damaged record), every known lineage gets its untrusted leg raised by `monitor_restart`. A damaged journal is moved aside as `journal.damaged-<time>`, and only its valid records are replayed. A private regular journal that cannot be read or is over the size limit is moved aside the same way and every session starts unknown. A symlink, a non-regular file, or a journal with the wrong owner or mode is never moved, and the monitor refuses to start. A deleted journal leaves every session unknown, so it denies until it registers again. If a change cannot be journaled, `health` reports `degraded` and every other operation fails `unavailable`.
+
+### Administrative clear (opt-in)
+
+Root can clear one lineage's taint through a separate, root-owned administrative socket. It is off by default: without it the taint is sticky, and nothing lowers a leg. There is no automatic clear, and no Claude Code or OpenCode command clears.
+
+**Clearing monitor state does not remove untrusted material already in an AI conversation.** Whatever the session read, a prompt injection included, is still in its context after a clear and can still steer it. Clear a lineage only when you have checked what raised its legs.
+
+**The socket.** systemd, as root, creates `/run/barmkin-admin` (`root:root`, `0700`) and the socket `admin.sock` in it (`root:root`, `0600`) from `packaging/systemd/barmkin-monitor-admin.socket`, and passes it to the monitor by socket activation. The drop-in `barmkin-monitor-admin.conf` adds `-admin-socket /run/barmkin-admin/admin.sock` to the monitor's command. The monitor never creates this socket itself. It refuses to start with `-admin-socket` unless systemd passed it the socket, and unless the directory is root's with no group or other access. It reads every connection's peer credentials (`SO_PEERCRED`) and closes any connection that is not from root before reading it. A request from another uid gets `forbidden`. The client socket answers none of the administrative paths (`/admin/v1/list`, `/admin/v1/clear`), so no shim, plugin, MCP server, managed gate or ordinary user can reach them. The contract is in [`internal/admin`](internal/admin/admin.go).
+
+**The command.** Root runs `barmkin monitor-admin`:
+
+```
+barmkin monitor-admin list  [-admin-socket PATH] [-json]
+barmkin monitor-admin clear -uid UID -host claude_code|opencode -lineage ID \
+                            -reason false_positive|reviewed_safe|monitor_recovery [-admin-socket PATH]
+```
+
+- `list` shows each lineage without content. It shows the opaque lineage id (the root session's token), the client's uid and host, the epoch, each leg with the closed source that raised it and when, the session ids, and every earlier clear with the legs it lowered.
+- `clear` names one lineage exactly. A subagent's session id, another uid or another host is refused. The reason is one of three fixed codes, never free text. `clear` needs a terminal on standard input. It shows the lineage and the warning above, and clears only when you type the lineage id back. It sends the epoch and legs it showed, so if the lineage has changed since, the monitor refuses the clear (`mismatch`). Both subcommands refuse to run as anyone but root, or to talk to a socket that is not root's in a directory only root can enter.
+
+**What a clear does.** The monitor appends a `clear` record to the journal. The record names the lineage, the new epoch, the reason and the time. The monitor fsyncs the record before it lowers the legs or answers. If the journal cannot take the record, nothing is lowered and the monitor degrades. The cleared raises stay in the journal, and the snapshot written at every start keeps them. `list` keeps showing them as the lineage's history. The monitor drops every pre-registration of the lineage's sessions. Each session gets `unknown_session` on its next request until it registers again in the new epoch; both shims re-register on that error. Legs can rise again as usual. The monitor logs each clear, with uid, host, lineage, epoch and reason. Clear records are never exported through OpenTelemetry. A clear survives a clean restart. After a crash, `monitor_restart` taints every lineage again, as it always does.
+
+**Turning it on.** On Debian and Ubuntu, `sudo packaging/install.sh install --admin-socket`. Running `install` again without `--admin-socket` removes the socket. On NixOS, set `services.barmkin.adminSocket.enable = true;`. This also puts `barmkin` on the system `PATH` for root. Root is trusted here as everywhere: a process running as root can talk to the socket without a terminal, so never run an agent as root.
 
 ## Local monitor (foundation)
 
@@ -232,7 +258,7 @@ A session without the shim, or with a broken one, can therefore run no tools: th
 
 The HUD and the status command read a cache of the legs the monitor last reported, so they never wait on it.
 
-**The taint is sticky.** Legs only rise. No prompt, command, compaction or `/clear` lowers one, and there is no clear command. Only a new session starts clean.
+**The taint is sticky.** Legs only rise. No prompt, command, compaction or `/clear` lowers one, and there is no clear command. Only a new session starts clean, unless root opts in to the [administrative clear](#administrative-clear-opt-in), which works only from root's terminal. After one, the shim re-registers the session when the monitor answers `unknown_session`.
 
 **Failure denies.** Every request has a 1-second deadline. When a request times out, fails, gets an error code or a malformed reply, or reaches a monitor of another contract version, the step it guards is denied with text saying why:
 - a guarded call is denied;
@@ -366,7 +392,8 @@ sudo packaging/install.sh uninstall
 `make managed-install` and `make managed-uninstall` do the same, without `--client`.
 - `install` needs root, systemd, and `/usr/bin/bwrap` and `/usr/bin/socat`. Run it again and it changes nothing already in place. A new binary or unit restarts the monitor with a clean stop, so no session is tainted.
 - `install` refuses to replace a `/etc/claude-code/managed-settings.json` it did not write: barmkin's managed settings replace the whole file.
-- `uninstall` stops and removes the service, the state and runtime directories, the binary, the marketplace, the user and the group. It removes the managed settings only if `install` wrote them. Run it again and it does nothing.
+- `install --admin-socket` also installs the opt-in [administrative socket](#administrative-clear-opt-in) and its drop-in, and restarts the monitor with it. `install` without the flag removes them again.
+- `uninstall` stops and removes the service, the administrative socket, the state and runtime directories, the binary, the marketplace, the user and the group. It removes the managed settings only if `install` wrote them. Run it again and it does nothing.
 
 **NixOS:**
 
@@ -375,7 +402,7 @@ imports = [ /path/to/barmkin/packaging/nixos/module.nix ];
 services.barmkin = { enable = true; clients = [ "alice" ]; };
 ```
 
-Switching to a configuration without it uninstalls everything but `/var/lib/barmkin`, which NixOS keeps like any `StateDirectory`.
+Switching to a configuration without it uninstalls everything but `/var/lib/barmkin`, which NixOS keeps like any `StateDirectory`. `services.barmkin.adminSocket.enable = true;` adds the opt-in [administrative socket](#administrative-clear-opt-in). Switching back to a configuration without it removes the socket. The empty root-only `/run/barmkin-admin` directory stays until reboot.
 
 **Tests:**
 
@@ -397,7 +424,15 @@ The Ubuntu test boots each release with systemd in a privileged container, from 
 - the uid pin: the gate denies a socket served by another uid (`monitor-uid-mismatch`);
 - recovery: after a `kill -9`, systemd restarts the monitor, the session comes back tainted by `monitor_restart`, and pre-registered calls are allowed again.
 
-Each test then installs again and checks that nothing changed, the running monitor included. It uninstalls twice, checks that nothing is left, and installs once more. The Ubuntu test also checks that `install` refuses managed settings it did not write and `uninstall` leaves them in place. CI runs the Ubuntu 24.04 test.
+`checks.sh admin` checks the opt-in administrative socket on an install that has it:
+- the socket is `root:root` `0600`, in `/run/barmkin-admin`, `root:root` `0700`;
+- neither the client user nor the outsider can connect to it;
+- the client socket refuses the administrative paths;
+- `monitor-admin clear` refuses without a terminal, and refuses when the lineage id is not typed back. A clear confirmed from a terminal (`script`) lowers the legs and is logged. The session must then register again. The journal keeps the cleared raise and the clear, and the clear survives a restart.
+
+`checks.sh no-admin` checks that the default install has no administrative socket.
+
+Each test checks that a default install has no administrative socket, opts in to one and checks it, and opts out again. The Ubuntu test also installs with `--admin-socket` a second time and checks that nothing changed. Each test then installs again and checks that nothing changed, the running monitor included. It uninstalls twice, checks that nothing is left, and installs once more. The Ubuntu test also checks that `install` refuses managed settings it did not write and `uninstall` leaves them in place. CI runs the Ubuntu 24.04 test.
 
 #### The managed-settings recipe
 
@@ -419,7 +454,7 @@ The lock holds against the demo user's own settings, mods and plugins. It does n
 
 [`shims/opencode`](shims/opencode/README.md) is the successor's guard for OpenCode 2.x: a plugin, `barmkin-opencode`, ported from barmkin-mod's OpenCode plugin, that talks to `barmkin monitor` over its socket. It is a partial port, not equivalent to the Claude Code seat: OpenCode 2 has no administrator-locked plugin seat and no managed gate, so a session without the plugin runs unguarded. Its README names what it does not cover.
 
-- **Sessions.** Each OpenCode session registers as a monitor session in its root session's lineage, so a subagent shares its parent's legs. The taint lives in the monitor, so an OpenCode restart keeps it, and a monitor `kill -9` brings every lineage back tainted by `monitor_restart`. The taint is sticky; there is no clear command.
+- **Sessions.** Each OpenCode session registers as a monitor session in its root session's lineage, so a subagent shares its parent's legs. The taint lives in the monitor, so an OpenCode restart keeps it, and a monitor `kill -9` brings every lineage back tainted by `monitor_restart`. The taint is sticky; there is no clear command. Only root's opt-in [administrative clear](#administrative-clear-opt-in) lowers it.
 - **Calls.** The plugin classifies every tool call into egress class ids and the monitor decides; it rechecks the final command, URL or path at OpenCode's permission step. Untrusted content goes to the monitor's screen as redacted windows, and the monitor core, which has no screen yet, makes the plugin withhold it.
 - **MCP.** Hidden text in an MCP server's descriptions, schemas or instructions is a finding kept under a hash of the server's configuration. It taints only the sessions that list or call that server, not every session on the instance.
 - **Shell layer.** OpenCode's `shell.create.before` names no session. The plugin denies a command there only when every session with a shell tool call in flight would deny it, and leaves the rest to the permission step's session-aware recheck.

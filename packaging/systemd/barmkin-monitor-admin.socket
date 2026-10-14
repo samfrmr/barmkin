@@ -1,0 +1,30 @@
+# The barmkin monitor's administrative socket: opt-in, root only.
+#
+# Not installed by default. packaging/install.sh installs it with
+# --admin-socket, and the NixOS module with services.barmkin.adminSocket.enable,
+# together with barmkin-monitor-admin.conf, the drop-in that hands it to the
+# monitor. Nothing else starts it: the drop-in's Requires= does.
+#
+# systemd, as root, creates the directory and the socket, and passes the
+# listening socket to the monitor by socket activation:
+#   /run/barmkin-admin             root:root 0700
+#   /run/barmkin-admin/admin.sock  root:root 0600
+# Only root can reach it. The monitor checks the directory, and drops every
+# connection whose peer is not root. `barmkin monitor-admin` is its client:
+# list shows lineages, and clear lowers one lineage's legs, from a terminal,
+# after the operator types the lineage id back. Clearing monitor state does
+# not remove untrusted material already in an AI conversation.
+
+[Unit]
+Description=barmkin monitor administrative socket (root only)
+Documentation=https://github.com/samfrmr/barmkin#administrative-clear-opt-in
+
+[Socket]
+ListenStream=/run/barmkin-admin/admin.sock
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+FileDescriptorName=barmkin-admin
+Service=barmkin-monitor.service
+RemoveOnStop=yes

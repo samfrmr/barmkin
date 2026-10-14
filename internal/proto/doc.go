@@ -41,7 +41,11 @@
 // and sensitive (leg B, sensitive data was touched). Legs only rise, and
 // nothing in this contract lowers one: there is no clear or rotate
 // operation, no clear capability, and no human-prompt rotation. A session
-// keeps its legs until it ends; a new session is a new registration.
+// keeps its legs until it ends; a new session is a new registration. The
+// one way a leg falls is outside this contract: root's opt-in administrative
+// clear (internal/admin), on a separate root-only socket no shim speaks.
+// After one, every session of the cleared lineage is answered
+// unknown_session until it registers again.
 //
 // # Versioning and decoding
 //

@@ -11,6 +11,8 @@
     "/v1/capability",
     "/v1/ack",
     "/v1/end",
+    "/admin/v1/clear",
+    "/admin/v1/list",
     "/v2/register",
     "/v1/register/",
     "/v1/Register",

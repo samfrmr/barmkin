@@ -10,6 +10,9 @@
 #   - installs, and checks the deployment, the gate, posture refusal,
 #     version-mismatch denial and recovery after SIGKILL (checks.sh installed);
 #   - installs again, and checks that nothing changed, the monitor included;
+#   - opts in to the administrative socket (--admin-socket), checks it
+#     (checks.sh admin), that installing again changes nothing, and that a
+#     SIGKILL restart keeps it; then opts out again and checks it is gone;
 #   - checks that install refuses managed settings it did not write;
 #   - uninstalls, twice, and checks that nothing is left (checks.sh absent);
 #   - installs once more and checks again.
@@ -81,6 +84,27 @@ EOF
 	fi
 	echo "ok   - nothing changed, monitor included: $(tail -1 <<<"$after")"
 
+	step "opt in to the administrative socket"
+	run_in /src/packaging/test/checks.sh no-admin
+	run_in /src/packaging/install.sh install --binary /build/barmkin --client alice --admin-socket
+	run_in /src/packaging/test/checks.sh admin alice mallory
+	before=$(run_in /src/packaging/test/checks.sh fingerprint)
+	run_in /src/packaging/install.sh install --binary /build/barmkin --client alice --admin-socket
+	after=$(run_in /src/packaging/test/checks.sh fingerprint)
+	if [[ $before != "$after" ]]; then
+		diff <(echo "$before") <(echo "$after") || true
+		echo "FAIL: a second install with --admin-socket changed the installed state" >&2
+		exit 1
+	fi
+	echo "ok   - installing again changed nothing"
+	run_in /src/packaging/test/checks.sh installed alice mallory
+	run_in /src/packaging/test/checks.sh admin alice mallory
+
+	step "opt out of the administrative socket"
+	run_in /src/packaging/install.sh install --binary /build/barmkin --client alice
+	run_in /src/packaging/test/checks.sh no-admin
+	run_in /src/packaging/test/checks.sh installed alice mallory
+
 	step "managed settings it did not write"
 	run_in sh -c 'echo "{}" >/etc/claude-code/managed-settings.json'
 	if out=$(run_in /src/packaging/install.sh install --binary /build/barmkin 2>&1); then
@@ -98,7 +122,7 @@ EOF
 	run_in /src/packaging/test/checks.sh absent
 
 	step "install, uninstall, uninstall again"
-	run_in /src/packaging/install.sh install --binary /build/barmkin --client alice
+	run_in /src/packaging/install.sh install --binary /build/barmkin --client alice --admin-socket
 	run_in /src/packaging/install.sh uninstall
 	run_in /src/packaging/test/checks.sh absent
 	run_in /src/packaging/install.sh uninstall
