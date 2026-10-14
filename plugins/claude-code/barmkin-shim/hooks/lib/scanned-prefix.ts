@@ -66,7 +66,7 @@ function mergeOverlapping(spans: Span[]): Span[] {
   return out
 }
 
-function guardFor(view: string, rules: RedactionRule[]): ViewGuard {
+function guardFor(view: string, rules: readonly RedactionRule[]): ViewGuard {
   const spans: Span[] = []
   for (const rule of rules) spans.push(...ruleSpans(rule, view))
   // A private-key header nothing closes is key material the rule did not match.
@@ -106,7 +106,7 @@ function* candidateCuts(region: string): Generator<number> {
 
 export function scannedPrefix(
   text: string,
-  rules: RedactionRule[] = REDACTION_RULES,
+  rules: readonly RedactionRule[] = REDACTION_RULES,
   counters: Record<string, number> = {},
 ): ScannedPrefix | null {
   const region = text.slice(0, PREFIX_SCAN_CHARS)

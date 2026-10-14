@@ -14,10 +14,13 @@
 # from the package, and writes /etc/claude-code/managed-settings.json from
 # plugins/claude-code/managed-settings.example.json with the gate, the shim's
 # marketplace and the sandbox helpers pointing into the Nix store, and the
-# gate pinned to the barmkin user's uid.
+# gate pinned to the barmkin user's uid. It also writes the root policy the
+# shims read, /etc/barmkin/policy.yaml (services.barmkin.policy, by default
+# packaging/policy.yaml), as a root-owned 0644 copy rather than a link into
+# the store, since the shims refuse a symbolic link.
 #
 # Switching to a configuration without it uninstalls: the unit, the managed
-# settings, the user and the group go. Like any systemd StateDirectory,
+# settings, the policy, the user and the group go. Like any systemd StateDirectory,
 # /var/lib/barmkin stays.
 { config, lib, pkgs, ... }:
 
@@ -76,6 +79,19 @@ in
       remove untrusted material already in an AI conversation
     '';
 
+    policy = lib.mkOption {
+      type = lib.types.path;
+      default = ../policy.yaml;
+      defaultText = lib.literalExpression "./packaging/policy.yaml";
+      description = ''
+        The root policy the barmkin shims read at /etc/barmkin/policy.yaml. It
+        can only add redaction rules, injection phrases, secret paths and
+        outward-effect commands to the built-in ones; see packaging/policy.yaml
+        for the schema. A policy the shims cannot check makes them deny every
+        step they guard.
+      '';
+    };
+
     clients = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -106,6 +122,12 @@ in
 
     environment.etc."claude-code/managed-settings.json" = {
       text = builtins.toJSON managedSettings;
+      mode = "0644";
+    };
+
+    # A mode makes a copy, owned by root, not a link into the store.
+    environment.etc."barmkin/policy.yaml" = {
+      source = cfg.policy;
       mode = "0644";
     };
   };

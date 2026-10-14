@@ -106,7 +106,12 @@ export interface LaunchOptions {
   gateArgs?: string[]
   // Replaces the shim's transport. Default: one HTTP exchange over the socket.
   fetch?: typeof fetchOverSocket
+  // The root policy's text at /etc/barmkin/policy.yaml, as $.fs answers it.
+  // Default: no file. No other path exists, so no test reads the machine's /etc.
+  policy?: string
 }
+
+const POLICY_PATH = '/etc/barmkin/policy.yaml'
 
 export interface Use {
   call: string
@@ -165,6 +170,18 @@ export class ClaudeCode {
         resolve: () => undefined,
       },
       command: { register: async () => undefined },
+      fs: {
+        stat: async (path: string, o?: { resolve?: boolean }) => {
+          if (path !== POLICY_PATH || opts.policy === undefined) throw new Error('ENOENT: no such file or directory, stat ' + path)
+          const stat = { kind: 'file', size: Buffer.byteLength(opts.policy), mtimeMs: 0, isLink: false }
+          return o?.resolve ? { ...stat, realPath: POLICY_PATH } : stat
+        },
+        exists: async (path: string) => path === POLICY_PATH && opts.policy !== undefined,
+        read: async (path: string) => {
+          if (path !== POLICY_PATH || opts.policy === undefined) throw new Error('ENOENT: no such file or directory, open ' + path)
+          return opts.policy
+        },
+      },
     }
   }
 

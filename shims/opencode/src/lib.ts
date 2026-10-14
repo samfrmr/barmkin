@@ -1,11 +1,21 @@
 // The host-neutral library this shim shares with the Claude Code shim
 // (plugins/claude-code/barmkin-shim/hooks/lib): secret redaction, the
 // invisible-text scrub, the egress classes, the screen's local inputs and the
-// MCP and skill guards. One copy serves both hosts, so a fix to the policy
+// MCP and skill guards, and the root policy. One copy serves both hosts, so a fix to the policy
 // lands in both; this file is the one place that names its path. The bundle
 // (see RELEASE-CHECKLIST.md "Build the bundle") inlines it.
 
 export { REDACTION_RULES } from '../../../plugins/claude-code/barmkin-shim/hooks/lib/redaction-rules'
+export {
+  POLICY_PATH,
+  MAX_POLICY_BYTES,
+  BUILTIN_POLICY,
+  policyFromRead,
+  describePolicy,
+  type ActivePolicy,
+  type PolicyLoad,
+  type PolicyRead,
+} from '../../../plugins/claude-code/barmkin-shim/hooks/lib/policy'
 export {
   redactInEitherView,
   classifierInput,

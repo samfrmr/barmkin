@@ -32,8 +32,9 @@ export const SOCKET_ENV = 'BARMKIN_MONITOR_SOCKET'
 export const TOKEN = /^[A-Za-z0-9._-]{1,128}$/
 
 // Why a request failed: one of the contract's codes, or a failure on the
-// shim's own side (no socket configured, or no answer within the deadline).
-export type Failure = Code | 'not_configured' | 'timeout'
+// shim's own side (no socket configured, no answer within the deadline, or a
+// root policy it cannot enforce, which it never sends a request under).
+export type Failure = Code | 'not_configured' | 'timeout' | 'policy_invalid'
 
 export type Answer<O extends Op> = { ok: true; value: Responses[O] } | { ok: false; failure: Failure }
 
@@ -113,5 +114,9 @@ export function describeFailure(failure: Failure): string {
       )
     case 'bad_request':
       return "the barmkin monitor rejected the shim's request"
+    case 'policy_invalid':
+      // The path is policy.ts's POLICY_PATH, written out so this file keeps its
+      // imports to the contract (node imports it without a resolver).
+      return 'the root policy /etc/barmkin/policy.yaml is invalid, so barmkin denies every step it guards until root fixes it'
   }
 }

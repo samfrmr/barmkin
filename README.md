@@ -238,6 +238,7 @@ Managed settings lock every Claude Code user on the machine, so install the seat
 | Binary | `/usr/local/bin/barmkin`, built static | the Nix store |
 | Shim marketplace | `/opt/barmkin/plugins/claude-code` | the Nix store |
 | Managed settings | `/etc/claude-code/managed-settings.json`, root's, `0644` | the same |
+| [Root policy](#root-policy-etcbarmkinpolicyyaml) | `/etc/barmkin/policy.yaml` from `packaging/policy.yaml`, root's, `0644`, in a root-owned `0755` directory | the same, from `services.barmkin.policy`, as a copy rather than a link into the store |
 
 The unit runs as `barmkin:barmkin-clients`. systemd creates `/run/barmkin` (`0750`, holding `monitor.sock`) and `/var/lib/barmkin` (`0700`, holding the journal). `Restart=always` brings the monitor back after a crash, and every known lineage then returns tainted by `monitor_restart`. The unit drops every capability, keeps the file system read-only outside those two directories, allows only Unix sockets and filters system calls. The installed managed settings pin the gate to the `barmkin` uid.
 
@@ -250,7 +251,7 @@ sudo packaging/install.sh install --client "$USER"   # log in again to take the 
 sudo packaging/install.sh uninstall
 ```
 
-`make managed-install` and `make managed-uninstall` do the same without `--client`. `install --admin-socket` also installs the opt-in [administrative socket](#administrative-clear-opt-in), and `install` without it removes the socket. `install` is idempotent. It restarts the monitor cleanly when the binary or unit changes, and it refuses to replace managed settings it did not write. `uninstall` removes everything `install` created.
+`make managed-install` and `make managed-uninstall` do the same without `--client`. `install --admin-socket` also installs the opt-in [administrative socket](#administrative-clear-opt-in), and `install` without it removes the socket. `install` is idempotent. It restarts the monitor cleanly when the binary or unit changes, and it refuses to replace managed settings it did not write. `install` writes the default root policy when there is none, updates a default nobody has edited, keeps one root has edited (making it root's, `0644`), and refuses a symlinked policy path. `uninstall` removes everything `install` created, except managed settings it did not write and a policy root has edited.
 
 **NixOS:**
 
@@ -260,6 +261,10 @@ services.barmkin = { enable = true; clients = [ "alice" ]; };
 ```
 
 Then start `claude` as a member of `barmkin-clients`. `/barmkin-status` shows the legs and the monitor's state. Stop the monitor, or turn the shim off in the managed settings, to see every tool call denied.
+
+### Root policy (`/etc/barmkin/policy.yaml`)
+
+Both shims read one root-managed policy file. It can only add redaction rules, injection phrases, secret paths and outward-effect commands to the built-in ones; see [`packaging/policy.yaml`](packaging/policy.yaml) for the schema. The AppArmor-locked `/etc` and root inside the sandbox mean users cannot rewrite it, and the shims refuse a policy that is a symlink or that anyone but root can write. A policy the shims cannot check makes them deny every step they guard.
 
 ## Development
 

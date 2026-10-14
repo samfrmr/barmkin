@@ -4,6 +4,7 @@
 // so each body runs against a fresh monitor it can inspect and steer.
 import { mock, test as kitTest } from 'claude-code/testing'
 import { FakeMonitor, type FakeMonitorOptions } from './fake-monitor.ts'
+import { POLICY_PATH } from '../../hooks/lib/policy'
 
 export const SOCKET = '/run/barmkin/monitor.sock'
 export const SESSION = 'sess-test'
@@ -21,6 +22,21 @@ export interface World {
   clock: ReturnType<typeof mock.clock>
   // The session $.session.id() answers; a test may change it (a /clear).
   session: { id: string }
+  // Every path the shim asked $.fs about, in order.
+  fsPaths: string[]
+}
+
+// The root policy file as $.fs reports it at POLICY_PATH. Every other path is
+// missing, so no test reads the machine's own /etc.
+export interface PolicyFile {
+  text: string
+  // A symbolic link at the path itself.
+  isLink?: boolean
+  // Where the path resolves; POLICY_PATH unless set. null: it resolves nowhere.
+  realPath?: string | null
+  kind?: 'file' | 'dir' | 'other'
+  // A file that stats but cannot be read.
+  unreadable?: boolean
 }
 
 export interface WorldOptions extends FakeMonitorOptions {
@@ -33,6 +49,8 @@ export interface WorldOptions extends FakeMonitorOptions {
   // Leave the session unstarted, as a test of the first request's register.
   noStart?: boolean
   options?: Record<string, unknown>
+  // The root policy at POLICY_PATH. Default: no file.
+  policy?: PolicyFile
 }
 
 type Body = ($: any, on: any, world: World) => unknown
@@ -60,6 +78,26 @@ export function world(on: any, opts: WorldOptions = {}): World {
     return { value: undefined }
   })
   on('ui.notice', () => ({ value: undefined }))
+  const fsPaths: string[] = []
+  const policyAt = (path: string): PolicyFile | undefined => (path === POLICY_PATH ? opts.policy : undefined)
+  on('fs.stat', (_$: any, e: any) => {
+    fsPaths.push(e.path)
+    const file = policyAt(e.path)
+    if (!file) throw new Error('ENOENT: no such file or directory, stat ' + e.path)
+    const realPath = file.realPath === undefined ? POLICY_PATH : file.realPath
+    const stat = { kind: file.kind ?? 'file', size: new TextEncoder().encode(file.text).length, mtimeMs: 0, isLink: file.isLink ?? false }
+    return { value: e.resolve && realPath !== null ? { ...stat, realPath } : stat }
+  })
+  on('fs.exists', (_$: any, e: any) => {
+    fsPaths.push(e.path)
+    return { value: policyAt(e.path) !== undefined }
+  })
+  on('fs.read', (_$: any, e: any) => {
+    fsPaths.push(e.path)
+    const file = policyAt(e.path)
+    if (!file || file.unreadable) throw new Error('EACCES: permission denied, open ' + e.path)
+    return { value: file.text }
+  })
   on('http.fetch', async (_$: any, e: any) => {
     sockets.push(e.init?.socketPath)
     if (monitor.down) throw new Error('connect ECONNREFUSED ' + e.init?.socketPath)
@@ -67,7 +105,7 @@ export function world(on: any, opts: WorldOptions = {}): World {
     const r = monitor.handle(e.url, e.init?.body ?? '')
     return { value: { ok: r.status >= 200 && r.status < 300, status: r.status, headers: { 'content-type': 'application/json' }, text: r.text } }
   })
-  return { monitor, logs, sockets, clock, session }
+  return { monitor, logs, sockets, clock, session, fsPaths }
 }
 
 // start fires session.start, as Claude Code does before any turn.

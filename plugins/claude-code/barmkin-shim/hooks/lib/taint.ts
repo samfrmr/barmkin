@@ -60,8 +60,10 @@ const HIDDEN_COMMENT_ALONE_SCORE = 0.3
 // breaker is open. Deliberately capped below the auto-deny threshold: a
 // pattern match alone only ever escalates (taints), it never denies on its
 // own, since it has no Noul-style calibration behind it.
-export function heuristicInjectionScore(text: string): number {
-  const hits = INJECTION_HEURISTIC_PATTERNS.filter((re) => re.test(text)).length
+// `extra` holds the root policy's injection phrases (policy.ts): each one that
+// matches counts as one more hit, so the policy can only raise the score.
+export function heuristicInjectionScore(text: string, extra: readonly RegExp[] = []): number {
+  const hits = INJECTION_HEURISTIC_PATTERNS.filter((re) => re.test(text)).length + extra.filter((re) => re.test(text)).length
   const open = text.indexOf('<!--')
   const hasHiddenComment = open !== -1 && text.indexOf('-->', open + 4) !== -1
   if (hits === 0) return hasHiddenComment ? HIDDEN_COMMENT_ALONE_SCORE : 0

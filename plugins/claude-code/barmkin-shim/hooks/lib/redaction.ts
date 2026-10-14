@@ -120,7 +120,7 @@ function ruleMatches(rule: RedactionRule, text: string): boolean {
 // a caller can keep counting across multiple calls in the same turn.
 export function redactText(
   text: string,
-  rules: RedactionRule[],
+  rules: readonly RedactionRule[],
   counters: Record<string, number> = {},
 ): RedactionResult {
   if (exceedsScanLimit(text)) {
@@ -156,7 +156,7 @@ export function redactText(
 
 // Matches on the original text or its scrubbed view, so a zero-width character
 // can neither hide a secret from the rules nor split one into a match.
-export function containsSecretInEitherView(text: string, rules: RedactionRule[]): boolean {
+export function containsSecretInEitherView(text: string, rules: readonly RedactionRule[]): boolean {
   return containsAnySecret(text, rules) || containsAnySecret(scrubInvisible(text).text, rules)
 }
 
@@ -173,7 +173,7 @@ export const WITHHELD_TEXT = 'barmkin: withheld, the redacted text exceeds the 2
 // back to the local heuristics only, and the classifier is not called.
 export function classifierInput(
   text: string,
-  rules: RedactionRule[],
+  rules: readonly RedactionRule[],
   counters: Record<string, number>,
 ): string | null {
   if (exceedsScanLimit(text)) return null
@@ -183,7 +183,7 @@ export function classifierInput(
 
 export function redactInEitherView(
   text: string,
-  rules: RedactionRule[],
+  rules: readonly RedactionRule[],
   counters: Record<string, number>,
 ): { text: string; redactedCount: number } {
   const first = redactText(text, rules, counters)
@@ -194,7 +194,7 @@ export function redactInEitherView(
   return { text: second.text, redactedCount: first.redactedCount + second.redactedCount }
 }
 
-export function containsAnySecret(text: string, rules: RedactionRule[]): boolean {
+export function containsAnySecret(text: string, rules: readonly RedactionRule[]): boolean {
   if (exceedsScanLimit(text)) return false
   return rules.some((rule) => ruleMatches(rule, text))
 }

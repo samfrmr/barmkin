@@ -11,7 +11,9 @@
 #
 # installed checks the deployment (owners and modes of the socket, the
 # journal and their directories, the managed settings and the gate's uid
-# pin), that only the client group reaches the socket, and then, with the
+# pin), that only the client group reaches the socket, that the root policy
+# is root's, readable by the client and, when Node 22.18+ is on PATH,
+# accepted by the installed shim's own policy library, and then, with the
 # gate command the managed settings hold, run as the client user:
 #   - a call the shim pre-registered is allowed;
 #   - a session whose posture is insecure is refused, and its calls denied;
@@ -43,6 +45,8 @@ readonly journal=$state_dir/journal
 readonly admin_unit=barmkin-monitor-admin.socket
 readonly admin_dir=/run/barmkin-admin
 readonly admin_socket=$admin_dir/admin.sock
+readonly policy_dir=/etc/barmkin
+readonly policy=$policy_dir/policy.yaml
 
 ok() { echo "ok   - $*"; }
 fail() { echo "FAIL - $*" >&2; exit 1; }
@@ -173,6 +177,39 @@ cmd_installed() {
 	grep -Eq '"allowUnsandboxedCommands": *false' "$settings" || fail "managed settings allow unsandboxed commands"
 	! grep -q allowAllUnixSockets "$settings" || fail "managed settings mention allowAllUnixSockets"
 	ok "managed settings keep the lock: allowManagedHooksOnly, sandbox without unsandboxed commands"
+
+	echo "== root policy"
+	modes "$policy_dir" "root:root 755 directory"
+	modes "$policy" "root:root 644 regular file"
+	runuser -u "$client" -- cat "$policy" >/dev/null || fail "client $client cannot read $policy"
+	! runuser -u "$client" -- sh -c ": >>'$policy'" 2>/dev/null || fail "client $client can write $policy"
+	ok "client $client reads $policy and cannot write it"
+	node=$(command -v node || true)
+	if [[ -n $node ]] && "$node" -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a == 22 && b >= 18) ? 0 : 1)'; then
+		# shellcheck disable=SC2016 # JavaScript, not shell
+		out=$(runuser -u "$client" -- "$node" --input-type=module -e '
+			import { registerHooks } from "node:module"
+			import { readFileSync } from "node:fs"
+			// The hooks module imports its own files without an extension, as Claude Code resolves them.
+			registerHooks({
+				resolve(specifier, context, next) {
+					try {
+						return next(specifier, context)
+					} catch (err) {
+						if (err?.code !== "ERR_MODULE_NOT_FOUND" || !specifier.startsWith(".")) throw err
+						return next(specifier + ".ts", context)
+					}
+				},
+			})
+			const p = await import(process.argv[1] + "/barmkin-shim/hooks/lib/policy.ts")
+			const load = p.policyFromRead({ kind: "file", text: readFileSync(p.POLICY_PATH, "utf8") })
+			console.log(load.state + ": " + p.describePolicy(load))
+		' "$marketplace" 2>&1) || true
+		[[ $out == "loaded: the root policy $policy adds "* ]] || fail "installed shim's policy library on $policy: $out"
+		ok "installed shim's policy library accepts $policy: $out"
+	else
+		echo "skip - no Node 22.18+ on PATH: the installed shim's policy library is not run"
+	fi
 
 	echo "== socket access"
 	expect_post '"state":"ok"' "client $client reaches the monitor" "$client" health '{"version":1}'
@@ -348,11 +385,11 @@ cmd_no_admin() {
 cmd_fingerprint() {
 	local gate f
 	read -r -a gate <<<"$(json_string command "$settings")"
-	for f in "$runtime_dir" "$socket" "$state_dir" "$journal" "$settings" "${gate[0]}"; do
+	for f in "$runtime_dir" "$socket" "$state_dir" "$journal" "$settings" "${gate[0]}" "$policy_dir" "$policy"; do
 		stat -c '%n %U:%G %a %F' "$f"
 	done
 	find "$(json_string path "$settings")" -printf '%p %U:%G %m %s\n' | sort
-	sha256sum "$settings" "${gate[0]}" "$(systemctl show -p FragmentPath --value "$unit")"
+	sha256sum "$settings" "${gate[0]}" "$policy" "$(systemctl show -p FragmentPath --value "$unit")"
 	getent passwd barmkin
 	getent group barmkin-clients
 	systemctl is-enabled "$unit"
@@ -376,6 +413,9 @@ cmd_absent() {
 	[[ $(systemctl show -p LoadState --value "$admin_unit") == not-found && ! -e $admin_socket ]] ||
 		fail "the administrative socket is still there"
 	ok "the administrative socket is gone"
+	[[ ! -e $policy && ! -L $policy ]] || fail "$policy is still there"
+	[[ ! -d $policy_dir ]] || [[ -z $(ls -A "$policy_dir") ]] || fail "$policy_dir still holds $(ls -A "$policy_dir")"
+	ok "the root policy is gone"
 	if [[ $keep_state != --keep-state ]]; then
 		[[ ! -e $state_dir ]] || fail "$state_dir is still there"
 		ok "$state_dir is gone"
