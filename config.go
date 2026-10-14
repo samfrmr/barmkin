@@ -33,7 +33,7 @@ type Config struct {
 type Rule struct {
 	Name    string `yaml:"name"`    // human-readable identifier (must be unique)
 	Pattern string `yaml:"pattern"` // Go regex (re2) matched against command content
-	Action  string `yaml:"action"`  // "deny" (default) or "allow" (overrides all denies)
+	Action  string `yaml:"action"`  // "deny" (default) or "allow" (exempts deny matches inside its own match)
 	Reason  string `yaml:"reason"`  // shown to the LLM when denied
 	Example string `yaml:"example"` // test string - verified by `go test` and `barmkin validate`
 	regex   *regexp.Regexp
