@@ -32,7 +32,11 @@
 // damaged journal), a request it accepted may have been lost, so every
 // lineage it knew starts with its untrusted leg raised by monitor_restart.
 // A damaged journal is moved aside as journal.damaged-<time>, and only
-// the records that still pass their checks are replayed. If a change
+// the records that still pass their checks are replayed. A private regular
+// journal that cannot be read or is over the size limit is moved aside the
+// same way, and every session then starts unknown. A symlink, a
+// non-regular file or a journal with the wrong owner or mode is never
+// followed or moved, and the monitor refuses to start. If a change
 // cannot be journaled, the monitor degrades: health reports degraded and
 // every other operation fails unavailable until it is restarted.
 //
