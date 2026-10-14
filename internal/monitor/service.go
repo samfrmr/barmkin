@@ -115,11 +115,15 @@ func (m *Monitor) replay(stateDir string) error {
 	path := filepath.Join(stateDir, "journal")
 	res, err := journal.Load(path)
 	if err != nil {
-		return err
-	}
-	if res.Damaged {
-		aside := fmt.Sprintf("%s.damaged-%d", path, time.Now().UnixNano())
-		if err := os.Rename(path, aside); err != nil {
+		aside, qerr := moveAside(path)
+		if qerr != nil {
+			return fmt.Errorf("%w (and could not move it aside: %v)", err, qerr)
+		}
+		m.logf("journal unreadable (%v); moved it to %s and every session starts unknown", err, aside)
+		res = journal.Result{}
+	} else if res.Damaged {
+		aside, err := moveAside(path)
+		if err != nil {
 			return fmt.Errorf("move damaged journal aside: %w", err)
 		}
 		m.logf("journal damaged; moved it to %s and kept %d valid records", aside, len(res.Records))
@@ -140,6 +144,25 @@ func (m *Monitor) replay(stateDir string) error {
 	m.core.journal = m.journal
 	m.logf("replayed %d sessions in %d lineages", len(m.core.sessions), len(m.core.lineages))
 	return nil
+}
+
+// moveAside renames the journal, which must be a regular file or a symlink
+// directly inside the state directory, to a unique name next to it. Renaming
+// a symlink moves the link and never touches its target. Anything else is
+// refused rather than moved.
+func moveAside(path string) (string, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !fi.Mode().IsRegular() && fi.Mode()&os.ModeSymlink == 0 {
+		return "", fmt.Errorf("%s is neither a regular file nor a symlink", path)
+	}
+	aside := fmt.Sprintf("%s.damaged-%d", path, time.Now().UnixNano())
+	if err := os.Rename(path, aside); err != nil {
+		return "", err
+	}
+	return aside, nil
 }
 
 // Serve answers requests until ctx is done, then stops accepting, drains

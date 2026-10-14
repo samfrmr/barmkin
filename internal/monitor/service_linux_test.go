@@ -213,10 +213,8 @@ func TestStartChecksDeployment(t *testing.T) {
 			geteuid = func() int { return 0 }
 			t.Cleanup(func() { geteuid = os.Geteuid })
 		},
-		"shared journal": func(t *testing.T, cfg *Config) {
-			p := filepath.Join(cfg.StateDir, "journal")
-			os.WriteFile(p, nil, 0o600)
-			os.Chmod(p, 0o640)
+		"journal is a directory": func(t *testing.T, cfg *Config) {
+			os.Mkdir(filepath.Join(cfg.StateDir, "journal"), 0o700)
 		},
 		"socket path taken by a file": func(t *testing.T, cfg *Config) {
 			os.WriteFile(cfg.Socket, nil, 0o600)
@@ -358,6 +356,39 @@ func TestDamagedJournalIsSalvaged(t *testing.T) {
 	}
 	if _, code := c.legsAt(t, "lost"); code != proto.CodeUnknownSession {
 		t.Errorf("a session whose record was damaged: %q, want unknown_session", code)
+	}
+}
+
+func TestUnreadableJournalIsQuarantined(t *testing.T) {
+	cases := map[string]func(t *testing.T, path string){
+		"shared mode": func(t *testing.T, path string) { os.Chmod(path, 0o640) },
+		"symlink": func(t *testing.T, path string) {
+			target := path + "-target"
+			os.Rename(path, target)
+			os.Symlink(target, path)
+		},
+	}
+	for name, damage := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := deployment(t)
+			r := serve(t, cfg)
+			c := newClient(cfg.Socket)
+			c.must(t, proto.OpRegister, registerBody("s", true))
+			r.shutdown(t)
+			path := filepath.Join(cfg.StateDir, "journal")
+			damage(t, path)
+
+			serve(t, cfg)
+			if aside, _ := filepath.Glob(path + ".damaged-*"); len(aside) != 1 {
+				t.Errorf("journal not moved aside: %v", aside)
+			}
+			if _, code := c.legsAt(t, "s"); code != proto.CodeUnknownSession {
+				t.Errorf("a session from an unreadable journal: %q, want unknown_session", code)
+			}
+			if _, err := journal.Load(path); err != nil {
+				t.Errorf("replacement journal unreadable: %v", err)
+			}
+		})
 	}
 }
 
