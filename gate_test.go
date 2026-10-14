@@ -368,6 +368,51 @@ func TestGateSocketFromEnvironment(t *testing.T) {
 	}
 }
 
+// With -monitor-uid, the gate asks only a monitor socket served by that
+// uid, checked by the kernel's peer credentials.
+func TestGatePinsMonitorUID(t *testing.T) {
+	shortGateTimes(t)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
+	register(t, sock, "sess-a", "toolu_01A")
+	noEnv := func(string) string { return "" }
+	in := hookInput("sess-a", "toolu_01A")
+	self := strconv.Itoa(os.Getuid())
+	other := strconv.Itoa(os.Getuid() + 1)
+
+	code, stderr := gateWith(t, []string{"-socket", sock, "-monitor-uid", other}, strings.NewReader(in), noEnv)
+	wantDeny(t, code, stderr, gateMonitorUIDMismatch)
+	for _, bad := range []string{"barmkin", "-1", "4294967296", "1.5"} {
+		code, stderr := gateWith(t, []string{"-socket", sock, "-monitor-uid", bad}, strings.NewReader(in), noEnv)
+		wantDeny(t, code, stderr, gateMalformedRequest)
+	}
+	// Neither consumed the pre-registration.
+	if code, stderr := gateWith(t, []string{"-socket", sock, "-monitor-uid", self}, strings.NewReader(in), noEnv); code != 0 {
+		t.Fatalf("pinned to the monitor's own uid: exit %d %q", code, stderr)
+	}
+}
+
+// A deny because the shim did not register the session or the call says
+// the shim is not present.
+func TestGateDenySaysShimNotPresent(t *testing.T) {
+	shortGateTimes(t)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
+	registerSession(t, sock, "sess-a")
+	for in, reason := range map[string]gateReason{
+		hookInput("sess-b", "toolu_01A"): gateUnknownSession,
+		hookInput("sess-a", "toolu_01A"): gateUnregistered,
+	} {
+		code, stderr := gate(t, sock, in)
+		wantDeny(t, code, stderr, reason)
+		if !strings.HasPrefix(stderr, "[barmkin] gate denied: barmkin shim not present: ") {
+			t.Errorf("%s deny %q does not say the shim is not present", reason, stderr)
+		}
+	}
+	absent := filepath.Join(gateSocketDir(t), "absent.sock")
+	if _, stderr := gate(t, absent, hookInput("sess-a", "toolu_01A")); strings.Contains(stderr, "shim not present") {
+		t.Errorf("an unreachable monitor blames the shim: %q", stderr)
+	}
+}
+
 func TestGateDeniesMalformedOrStalledMonitor(t *testing.T) {
 	shortGateTimes(t)
 	reply := func(status int, body string) http.HandlerFunc {
@@ -491,7 +536,7 @@ func TestClaudeGateDemo(t *testing.T) {
 
 // TestClaudeLockLab runs scripts/claude-lock-lab.sh, the live Claude Code
 // lab for the full managed lock. It needs claude 2.1.x, bwrap, socat and
-// user namespaces, and takes about half a minute, so it runs only when
+// user namespaces, and takes over a minute, so it runs only when
 // BARMKIN_CLAUDE_LAB=1.
 func TestClaudeLockLab(t *testing.T) {
 	if os.Getenv("BARMKIN_CLAUDE_LAB") != "1" {

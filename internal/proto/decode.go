@@ -6,7 +6,6 @@ import (
 	"errors"
 	"math"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf16"
@@ -131,10 +130,27 @@ func checkShape(dec *json.Decoder, t reflect.Type) error {
 	return nil
 }
 
-// tokenPattern keeps session and call tokens opaque and content-free.
-var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+// MaxTokenBytes bounds a session, root or call token.
+const MaxTokenBytes = 128
 
-func validToken(s string) bool { return tokenPattern.MatchString(s) }
+// ValidToken reports whether s is an opaque session, root or call token:
+// 1 to MaxTokenBytes ASCII letters, digits, '.', '_' or '-'. Keeping tokens
+// to this shape keeps them content-free. It is checked byte by byte rather
+// than with a regexp, which would cost every process that links this
+// package (the managed gate among them) a compile at start.
+func ValidToken(s string) bool {
+	if len(s) == 0 || len(s) > MaxTokenBytes {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 func check(conds ...bool) error {
 	for _, c := range conds {
@@ -204,11 +220,11 @@ func validWindows(ws []string) bool {
 
 // scoped checks the fields every session-scoped request shares.
 func scoped(version int, host Host, session string) bool {
-	return version == Version && host.valid() && validToken(session)
+	return version == Version && host.valid() && ValidToken(session)
 }
 
 func (m *RegisterRequest) validate() error {
-	return check(scoped(m.Version, m.Host, m.Session), validToken(m.Root))
+	return check(scoped(m.Version, m.Host, m.Session), ValidToken(m.Root))
 }
 
 func (m *RegisterResponse) validate() error {
@@ -216,7 +232,7 @@ func (m *RegisterResponse) validate() error {
 }
 
 func (m *PreregisterRequest) validate() error {
-	return check(scoped(m.Version, m.Host, m.Session), validToken(m.Call))
+	return check(scoped(m.Version, m.Host, m.Session), ValidToken(m.Call))
 }
 
 func (m *PreregisterResponse) validate() error {
@@ -224,7 +240,7 @@ func (m *PreregisterResponse) validate() error {
 }
 
 func (m *GateRequest) validate() error {
-	return check(scoped(m.Version, m.Host, m.Session), validToken(m.Call))
+	return check(scoped(m.Version, m.Host, m.Session), ValidToken(m.Call))
 }
 
 func (m *GateResponse) validate() error { return check(m.Version == Version) }

@@ -21,7 +21,14 @@
 # plugins, a user marketplace or plugin-state file that points
 # barmkin-shim@barmkin-local elsewhere, disableAllHooks, --bare,
 # --safe-mode, bypassPermissions, and a sandboxed command forging a
-# registration. Control runs without the lock show the same probes do get
+# registration. Under the lock it also checks the strict presence gate's
+# failure paths live: a shim that is not installed, turned off in managed
+# settings, or fails to load, and a monitor that is down, stalls, or speaks
+# another contract version, each deny every call, Read and WebFetch as well
+# as Bash; a gate pinned to the monitor's uid (-monitor-uid) allows, and one
+# pinned to another uid denies. It times the gate process as a host spawns
+# it, and fails if its p50 is not under 5 ms (BARMKIN_LAB_GATE_P50_MS).
+# Control runs without the lock show the same probes do get
 # past the gate there, that a host without the sandbox is refused by the
 # monitor so it runs no tools at all, and that a shim written as a plugin
 # PreToolUse command hook never registers a call before the gate.
@@ -46,11 +53,12 @@ version=$(claude --version | awk '{print $1}')
 
 # Socket paths must stay short.
 work=$(mktemp -d /tmp/bmklab.XXXXXX)
-mock_pid= mon_pid=
+mock_pid= mon_pid= fake_pid=
 # cleanup_keep stops the lab's servers; cleanup also removes its files.
 cleanup_keep() {
 	[[ -n $mock_pid ]] && kill "$mock_pid" 2>/dev/null || true
 	[[ -n $mon_pid ]] && kill -KILL "$mon_pid" 2>/dev/null || true
+	[[ -n $fake_pid ]] && kill "$fake_pid" 2>/dev/null || true
 }
 cleanup() {
 	cleanup_keep
@@ -69,7 +77,9 @@ mkdir -p "$work/bin" "$work/opt" "$work/run" "$work/state" "$work/scripts" "$wor
 # user's, as a root-managed unit would create them for the service user.
 chmod 750 "$work/run"
 chmod 700 "$work/state"
-go build -o "$work/bin/barmkin" .
+# Built static, as the recipe installs it: the gate starts faster without
+# the dynamic loader.
+CGO_ENABLED=0 go build -o "$work/bin/barmkin" .
 mkdir -p "$work/opt/plugins"
 cp -r plugins/claude-code "$work/opt/plugins/claude-code"
 # Claude Code writes type files into a mod folder it loads, so the probes
@@ -81,6 +91,13 @@ cp -r plugins/claude-code "$work/opt/cmdshim"
 cp "$lab/cmd-shim.mjs" "$work/opt/cmdshim/barmkin-shim/cmd-shim.mjs"
 echo '{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"node \"${CLAUDE_PLUGIN_ROOT}/cmd-shim.mjs\"","timeout":5}]}]}}' \
 	>"$work/opt/cmdshim/barmkin-shim/hooks/hooks.json"
+
+# The marketplace without the shim (not installed), and with a shim whose
+# hooks module fails to load.
+cp -r plugins/claude-code "$work/opt/noshim"
+rm -rf "$work/opt/noshim/barmkin-shim"
+cp -r plugins/claude-code "$work/opt/broken"
+printf 'export function register() {\n\tthrow new Error("barmkin lab: broken shim")\n}\n' >"$work/opt/broken/barmkin-shim/hooks/register.ts"
 
 # An impersonator in a user-writable directory: the real shim plus a hook
 # that swaps the command after the gate allows it.
@@ -98,7 +115,8 @@ node -e '
 # Managed-settings variants. nolock drops the lock but keeps the sandbox,
 # which the monitor requires before it registers a session; nosandbox drops
 # the sandbox too.
-mkdir -p "$work/etc/lock" "$work/etc/nolock" "$work/etc/nosandbox" "$work/etc/cmdshim-lock" "$work/etc/cmdshim-nolock"
+mkdir -p "$work/etc/lock" "$work/etc/nolock" "$work/etc/nosandbox" "$work/etc/cmdshim-lock" "$work/etc/cmdshim-nolock" \
+	"$work/etc/noshim" "$work/etc/shim-off" "$work/etc/broken" "$work/etc/pinned" "$work/etc/pin-other"
 cp plugins/claude-code/managed-settings.example.json "$work/etc/lock/managed-settings.json"
 cp plugins/claude-code/managed-settings.example.json "$work/etc/nolock/managed-settings.json"
 json "$work/etc/nolock/managed-settings.json" '(delete s.allowManagedHooksOnly, delete s.prependPlugins, s)'
@@ -108,6 +126,17 @@ for v in lock nolock; do
 	cp "$work/etc/$v/managed-settings.json" "$work/etc/cmdshim-$v/managed-settings.json"
 	json "$work/etc/cmdshim-$v/managed-settings.json" '(s.extraKnownMarketplaces["barmkin-local"].source.path = "/opt/barmkin/cmdshim", s)'
 done
+# Full-lock variants: the shim not installed, turned off by the managed
+# settings, or failing to load; the gate pinned to this user's uid (the
+# monitor's here) or to another.
+for v in noshim shim-off broken pinned pin-other; do
+	cp plugins/claude-code/managed-settings.example.json "$work/etc/$v/managed-settings.json"
+done
+json "$work/etc/noshim/managed-settings.json" '(s.extraKnownMarketplaces["barmkin-local"].source.path = "/opt/barmkin/noshim", s)'
+json "$work/etc/shim-off/managed-settings.json" '(s.enabledPlugins["barmkin-shim@barmkin-local"] = false, s)'
+json "$work/etc/broken/managed-settings.json" '(s.extraKnownMarketplaces["barmkin-local"].source.path = "/opt/barmkin/broken", s)'
+json "$work/etc/pinned/managed-settings.json" "(s.hooks.PreToolUse[0].hooks[0].command += ' -monitor-uid $(id -u)', s)"
+json "$work/etc/pin-other/managed-settings.json" "(s.hooks.PreToolUse[0].hooks[0].command += ' -monitor-uid $(($(id -u) + 1))', s)"
 chmod 444 "$work"/etc/*/managed-settings.json
 
 start_monitor() {
@@ -124,6 +153,20 @@ stop_monitor() {
 	kill -KILL "$mon_pid"
 	wait "$mon_pid" 2>/dev/null || true
 	mon_pid=
+	rm -f "$work/run/monitor.sock"
+}
+# start_fake <stall|version>: a broken monitor on the monitor's socket.
+start_fake() {
+	node "$lab/fake-monitor.mjs" "$work/run/monitor.sock" "$1" &
+	fake_pid=$!
+	for _ in $(seq 50); do [[ -S $work/run/monitor.sock ]] && return 0; sleep 0.1; done
+	echo "FAIL: fake monitor did not start" >&2
+	exit 1
+}
+stop_fake() {
+	kill "$fake_pid"
+	wait "$fake_pid" 2>/dev/null || true
+	fake_pid=
 	rm -f "$work/run/monitor.sock"
 }
 
@@ -244,6 +287,20 @@ forge() {
 	local body='{"version":1,"host":"claude_code","session":"forged","call":"toolu_forged"}'
 	printf '%s\n' "{ printf 'POST /v1/preregister HTTP/1.0\\r\\nContent-Length: ${#body}\\r\\n\\r\\n%s' '$body' | socat -t1 - UNIX-CONNECT:/run/barmkin/monitor.sock 2>&1 | tail -1; } > markers/$name.txt" >"$work/scripts/$name.cmd"
 }
+# One Read, one WebFetch and one Bash call in the same turn.
+tools() {
+	printf '%s\n' "READ $R/proj/.git/HEAD" "FETCH http://127.0.0.1:9/lab" "echo ORIGINAL > markers/$name.txt" >"$work/scripts/$name.cmd"
+}
+# denied_all <case> <reason>: every call of a tools case was denied by the
+# gate with the reason.
+denied_all() {
+	local n
+	n=$(node -e 'try{const r=String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).result??"");process.stdout.write(String(r.split(`\\"reason\\":\\"${process.argv[2]}\\"`).length-1))}catch{process.stdout.write("0")}' "$work/runs/$1/out.json" "$2")
+	[[ $n -ge 3 && ! -e $work/runs/$1/proj/markers/$1.txt ]] ||
+		{ echo "FAIL: $1: want Read, WebFetch and Bash denied with $2, saw $n: $(head -c 600 "$work/runs/$1/out.json")" >&2; exit 1; }
+	echo "    Read, WebFetch and Bash were all denied: $2"
+}
+
 # A file outside the project that reads as an injection: the shim sends it
 # to the monitor's screen, which raises the session's untrusted leg. The
 # push in the next turn must then be denied by the shim's egress gate, which
@@ -255,6 +312,10 @@ taint_then_push() {
 	printf '%s\n' "READ $R/tmp/page.txt" --- "git push origin main; echo ORIGINAL > markers/$name.txt" --- \
 		"git push origin main; echo ORIGINAL > markers/$name-late.txt" >"$work/scripts/$name.cmd"
 }
+
+# Timed first, while no session runs.
+echo "== gate latency"
+node "$lab/gate-latency.mjs" "$work/bin/barmkin" "$work/run/monitor.sock" 300 "${BARMKIN_LAB_GATE_P50_MS:-5}"
 
 echo "== full lock: the shim and the gate both run"
 check lock-allow lock ORIGINAL
@@ -299,14 +360,43 @@ expect_log lock-hijack-state "hooks module barmkin-shim@barmkin-local not loaded
 check lock-disable-shim lock ORIGINAL disable_shim
 check lock-safe-mode lock deny:unknown-session safe_mode
 
+echo "== full lock: a shim that is missing, turned off or broken is not present, so every call is denied"
+check lock-noshim noshim deny:unknown-session
+expect_log lock-noshim "Plugin directory not found at path: /opt/barmkin/noshim/barmkin-shim"
+check lock-noshim-tools noshim - tools
+denied_all lock-noshim-tools unknown-session
+check lock-shim-off shim-off deny:unknown-session
+expect_log lock-shim-off "will NOT register, plugin is disabled"
+check lock-broken broken deny:unknown-session
+expect_log lock-broken "hooks module barmkin-shim@barmkin-local failed to load: barmkin lab: broken shim"
+check lock-safe-mode-tools lock - safe_mode tools
+denied_all lock-safe-mode-tools unknown-session
+grep -q "barmkin shim not present" "$work/runs/lock-safe-mode-tools/out.json" ||
+	{ echo "FAIL: the deny does not say the shim is not present" >&2; exit 1; }
+echo "    the deny says: barmkin shim not present"
+
+echo "== full lock: a gate pinned to the monitor's uid"
+check lock-pinned pinned ORIGINAL
+check lock-pin-other pin-other deny:monitor-uid-mismatch
+
 echo "== full lock, monitor down: every call is denied"
 stop_monitor
 check down-plain lock deny:monitor-unavailable
+check down-tools lock - tools
+denied_all down-tools monitor-unavailable
 check down-disable-all-hooks lock deny:monitor-unavailable disable_all_hooks
 check down-bypass-permissions lock deny:monitor-unavailable bypass_permissions
 check down-bare lock deny:monitor-unavailable bare
 check down-user-hook lock deny:monitor-unavailable user_hook
 check down-plugin-dir lock deny:monitor-unavailable plugin_dir
+
+echo "== full lock, monitor stalled or of another contract version: every call is denied"
+start_fake stall
+check stall-plain lock deny:monitor-unavailable
+stop_fake
+start_fake version
+check version-plain lock deny:version-mismatch
+stop_fake
 start_monitor
 
 echo "== controls: without the lock the same probes get past the gate"
