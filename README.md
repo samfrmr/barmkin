@@ -148,6 +148,12 @@ The journal is `0600`. The socket is `0660`, group `barmkin-clients`. The servic
 - `decide` follows barmkin-mod's egress postures: the untrusted leg denies the deny classes and warns on the rest, both legs deny everything, and a clean session warns only on destructive classes.
 - The core has no classifier. `screen` raises the untrusted leg for the content's source and answers `unavailable`.
 
+**Screen service.** `internal/screen` is the Jev screen service the monitor will use, ported from barmkin-mod's TypeScript screen. The monitor core does not call it yet. It takes a shim's already-redacted classifier windows, the shim's local scores and the content's source. It returns pass, escalate or deny, with the composed scores, a closed reason code, a gap code and the legs the content raises. Jev can only raise a score. Content past the last window, or a multi-window plan with a window Jev did not answer, escalates with a gap. A single-window plan whose call fails is decided on its local scores alone, so clean content passes.
+- The Jev endpoint and credential belong to the monitor's own configuration, not a plugin's.
+- Each endpoint has a breaker.
+- Answers are cached for 24 hours in a bounded cache. Failures are never cached, the cache has no query endpoint, and the shadow screen uses its own namespace.
+- Golden tests replay barmkin-mod's TypeScript against recorded mock Jev responses. No test calls Jev.
+
 **Journal.** A leg raise or registration is fsynced before the request is answered. At every start the monitor replays the journal and rewrites it as a compact snapshot. If the last run did not stop cleanly (a crash, `SIGKILL`, a torn tail or a damaged record), every known lineage gets its untrusted leg raised by `monitor_restart`. A damaged journal is moved aside as `journal.damaged-<time>`, and only its valid records are replayed. A private regular journal that cannot be read or is over the size limit is moved aside the same way and every session starts unknown. A symlink, a non-regular file, or a journal with the wrong owner or mode is never moved, and the monitor refuses to start. A deleted journal leaves every session unknown, so it denies until it registers again. If a change cannot be journaled, `health` reports `degraded` and every other operation fails `unavailable`.
 
 ## Local monitor (foundation)
