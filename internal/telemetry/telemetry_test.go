@@ -159,8 +159,8 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 // The tokens, uids and content a monitor holds that must never be exported.
 const (
-	secretSession = "session-token-SECRET-1f2e3d"
-	secretRoot    = "root-token-SECRET-9a8b7c"
+	secretSession = "session-SECRET-one"
+	secretRoot    = "root-SECRET-two"
 	secretUID     = 4_123_456_789
 )
 
