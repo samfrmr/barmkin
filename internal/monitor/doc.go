@@ -88,4 +88,12 @@
 // The server reads each connection's peer credentials and closes any
 // connection it cannot identify. A Go client can pin the service user with
 // [DialPinned]; the TypeScript shims cannot, which is a known residual.
+//
+// # Telemetry
+//
+// With [Config.Telemetry] set from root's configuration, the monitor
+// exports each journaled change, content-free, through internal/telemetry.
+// A change is handed over only after its append returned, and the hand-off
+// never blocks, so the export cannot delay, reorder or change an answer or
+// an fsync. The journal stays the authoritative record.
 package monitor

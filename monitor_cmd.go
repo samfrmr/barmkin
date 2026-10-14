@@ -1,10 +1,12 @@
 // Monitor runs the barmkin monitor service (internal/monitor).
 //
 //	barmkin monitor [-socket PATH] [-state-dir PATH] [-client-group NAME]
-//	                [-preregister-ttl DURATION]
+//	                [-preregister-ttl DURATION] [-telemetry-config PATH]
 //
 // It is meant to run as a dedicated service user, under a root-managed
-// unit that creates its state and runtime directories. It serves until
+// unit that creates its state and runtime directories. -telemetry-config
+// names root's OTLP export configuration (internal/telemetry); without it,
+// nothing is exported. It serves until
 // SIGINT or SIGTERM, then journals a clean stop and exits 0; it exits 1
 // when its deployment checks fail or it cannot serve.
 
@@ -19,20 +21,29 @@ import (
 	"syscall"
 
 	"github.com/Daviey/barmkin/internal/monitor"
+	"github.com/Daviey/barmkin/internal/telemetry"
 )
 
 func cmdMonitor(args []string) {
 	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
-	cfg := monitor.Config{Logf: func(format string, args ...any) {
+	cfg := monitor.Config{Version: version, Logf: func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "[barmkin monitor] "+format+"\n", args...)
 	}}
 	fs.StringVar(&cfg.Socket, "socket", monitor.DefaultSocket, "client Unix socket path")
 	fs.StringVar(&cfg.StateDir, "state-dir", monitor.DefaultStateDir, "state directory holding the journal")
 	fs.StringVar(&cfg.ClientGroup, "client-group", monitor.DefaultClientGroup, "group allowed to connect to the socket")
 	fs.DurationVar(&cfg.PreregisterTTL, "preregister-ttl", monitor.DefaultPreregisterTTL, "how long a pre-registered call stays live")
+	telemetryConfig := fs.String("telemetry-config", "", "root-owned OTLP export configuration (default: no export)")
 	fs.Parse(args)
 	if fs.NArg() > 0 {
 		fatalf("monitor: unexpected argument %q", fs.Arg(0))
+	}
+	if *telemetryConfig != "" {
+		tc, err := telemetry.LoadConfig(*telemetryConfig)
+		if err != nil {
+			fatalf("monitor: %v", err)
+		}
+		cfg.Telemetry = &tc
 	}
 
 	m, err := monitor.Start(cfg)

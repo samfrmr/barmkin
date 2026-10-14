@@ -43,3 +43,17 @@ regexes = ['''^AKIAIOSFODNN7EXAMPLF$''']
 [[allowlists]]
 description = "jwt.io example token (the shim's hooks/lib/redaction-rules.ts, tests/redaction.test.ts, tests/linear-scanners.test.ts)"
 regexes = ['''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U$''']
+
+# Fixtures from the OTLP export tests (internal/monitor/telemetry_test.go,
+# internal/telemetry/telemetry_test.go), kept in this branch's earlier commit
+# and so still in the scanned history. Each is a fake value the tests search
+# the export for, matched by the value itself.
+[[allowlists]]
+description = "Fake session and root tokens in the OTLP export tests"
+regexes = [
+  '''^sess-PRIVATE-a1b2c3$''',
+  '''^sess-PRIVATE-sub-d4e5$''',
+  '''^sess-PRIVATE-x-f6a7$''',
+  '''^session-token-SECRET-1f2e3d$''',
+  '''^root-token-SECRET-9a8b7c$''',
+]

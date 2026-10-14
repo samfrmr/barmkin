@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Daviey/barmkin/internal/journal"
+	"github.com/Daviey/barmkin/internal/telemetry"
 )
 
 // Defaults for the root-managed service deployment.
@@ -34,16 +35,23 @@ type Config struct {
 	ClientGroup    string        // the group whose members may connect
 	PreregisterTTL time.Duration // how long a pre-registration stays live
 	Logf           func(format string, args ...any)
+
+	// Telemetry, when set, exports the journal's state changes to an
+	// OTLP/HTTP collector (internal/telemetry). It comes from root's
+	// configuration; nil, the default, exports nothing.
+	Telemetry *telemetry.Config
+	Version   string // the monitor's version, exported as service.version
 }
 
 // Monitor is a started monitor: its state is replayed and journaled, and
 // its socket is listening.
 type Monitor struct {
-	core    *core
-	journal *journal.Journal
-	lock    *os.File
-	ln      net.Listener
-	logf    func(format string, args ...any)
+	core      *core
+	journal   *journal.Journal
+	telemetry *telemetry.Exporter
+	lock      *os.File
+	ln        net.Listener
+	logf      func(format string, args ...any)
 }
 
 // geteuid is os.Geteuid, replaceable in tests.
@@ -94,6 +102,16 @@ func Start(cfg Config) (*Monitor, error) {
 	if m.lock, err = lockState(cfg.StateDir); err != nil {
 		return nil, err
 	}
+	if cfg.Telemetry != nil {
+		key, err := telemetry.LoadKey(cfg.StateDir)
+		if err == nil {
+			m.telemetry, err = telemetry.New(*cfg.Telemetry, key, cfg.Version, logf)
+		}
+		if err != nil {
+			m.Close()
+			return nil, fmt.Errorf("telemetry: %w", err)
+		}
+	}
 	if err := m.replay(cfg.StateDir); err != nil {
 		m.Close()
 		return nil, err
@@ -114,7 +132,9 @@ func Start(cfg Config) (*Monitor, error) {
 func (m *Monitor) replay(stateDir string) error {
 	path := filepath.Join(stateDir, "journal")
 	res, err := journal.Load(path)
+	recovery := telemetry.RecoveryClean
 	if errors.Is(err, journal.ErrUnreadable) {
+		recovery = telemetry.RecoveryUnreadable
 		aside, qerr := moveAside(path)
 		if qerr != nil {
 			return fmt.Errorf("%w (and could not move it aside: %v)", err, qerr)
@@ -124,6 +144,7 @@ func (m *Monitor) replay(stateDir string) error {
 	} else if err != nil {
 		return err
 	} else if res.Damaged {
+		recovery = telemetry.RecoveryDamaged
 		aside, err := moveAside(path)
 		if err != nil {
 			return fmt.Errorf("move damaged journal aside: %w", err)
@@ -137,6 +158,9 @@ func (m *Monitor) replay(stateDir string) error {
 	}
 	m.core = newCore(res.Records, res.Clean)
 	if !res.Clean {
+		if recovery == telemetry.RecoveryClean {
+			recovery = telemetry.RecoveryUnclean
+		}
 		m.logf("last run did not stop cleanly; every known lineage is marked monitor_restart")
 	}
 	m.journal, err = journal.Create(path, append(m.core.snapshot(), journal.Record{Kind: journal.KindStart}))
@@ -144,6 +168,9 @@ func (m *Monitor) replay(stateDir string) error {
 		return err
 	}
 	m.core.journal = m.journal
+	m.core.telemetry = m.telemetry
+	m.telemetry.Started(m.core.now(), recovery, m.core.restarted)
+	m.core.restarted = nil
 	m.logf("replayed %d sessions in %d lineages", len(m.core.sessions), len(m.core.lineages))
 	return nil
 }
@@ -212,6 +239,7 @@ func (m *Monitor) Close() error {
 	if m.journal != nil {
 		m.journal.Close()
 	}
+	m.telemetry.Close()
 	if m.lock != nil {
 		m.lock.Close()
 	}
