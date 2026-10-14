@@ -29,7 +29,8 @@ RestartSec=1s
 
 # The monitor only listens on its Unix socket and writes its state
 # directory. The Jev screen, once wired in, will also need AF_INET and
-# AF_INET6.
+# AF_INET6, as does the optional telemetry export (-telemetry-config), which
+# a drop-in enables.
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=

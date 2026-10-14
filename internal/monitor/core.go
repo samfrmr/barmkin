@@ -8,6 +8,7 @@ import (
 
 	"github.com/Daviey/barmkin/internal/journal"
 	"github.com/Daviey/barmkin/internal/proto"
+	"github.com/Daviey/barmkin/internal/telemetry"
 )
 
 // Limits on in-memory state. A request that would pass one is answered
@@ -49,7 +50,8 @@ type appender interface {
 
 // core holds the monitor's state and answers its operations. One mutex
 // serialises every operation; a change is journaled under it before the
-// operation returns.
+// operation returns, and only then handed to the telemetry export, which
+// never blocks.
 type core struct {
 	mu       sync.Mutex
 	journal  appender
@@ -59,6 +61,12 @@ type core struct {
 	ttl      time.Duration
 	now      func() time.Time
 	degraded bool // a change could not be journaled, or the core is closed
+
+	telemetry *telemetry.Exporter // nil when export is off
+
+	// restarted holds the monitor_restart raises newCore added, for the
+	// start's telemetry once the snapshot holding them is durable.
+	restarted []journal.Record
 }
 
 // newCore rebuilds state from replayed records. When the journal did not
@@ -86,7 +94,7 @@ func newCore(records []journal.Record, clean bool) *core {
 	}
 	if !clean {
 		for lk := range c.lineages {
-			c.raise(lk, journal.LegUntrusted, proto.SourceMonitorRestart)
+			c.restarted = append(c.restarted, c.raise(lk, journal.LegUntrusted, proto.SourceMonitorRestart)...)
 		}
 	}
 	return c
@@ -120,15 +128,18 @@ func (c *core) raise(lk lineageKey, leg journal.Leg, source proto.Source) []jour
 
 // commit journals records before the operation that made them answers.
 // Memory already holds the change, which only ever tightens; if the journal
-// fails, the core degrades and denies everything from then on.
+// fails, the core degrades and denies everything from then on. Telemetry
+// sees a change only after its append returned.
 func (c *core) commit(records []journal.Record) error {
 	if len(records) == 0 {
 		return nil
 	}
 	if err := c.journal.Append(records...); err != nil {
 		c.degraded = true
+		c.telemetry.Degraded(c.now())
 		return fail(proto.CodeUnavailable)
 	}
+	c.telemetry.Journaled(c.now(), records...)
 	return nil
 }
 
@@ -164,7 +175,12 @@ func (c *core) close() error {
 		return nil
 	}
 	c.degraded = true
-	return c.journal.Append(journal.Record{Kind: journal.KindShutdown})
+	stop := journal.Record{Kind: journal.KindShutdown}
+	if err := c.journal.Append(stop); err != nil {
+		return err
+	}
+	c.telemetry.Journaled(c.now(), stop)
+	return nil
 }
 
 func fail(code proto.Code) error { return &proto.Error{Code: code} }

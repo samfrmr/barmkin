@@ -115,7 +115,7 @@ Each evaluation appends a JSON line to `~/.barmkin/barmkin.log`:
 
 ## OpenTelemetry
 
-Set `otel.endpoint` in rules.yaml to send one span per evaluation to an OTLP collector:
+Set `otel.endpoint` in rules.yaml to send one span per `barmkin eval` evaluation to an OTLP collector. The monitor has its own, separate [telemetry export](#monitor-core-barmkin-monitor).
 
 ```yaml
 otel:
@@ -130,6 +130,7 @@ otel:
 ```
 barmkin monitor [-socket /run/barmkin/monitor.sock] [-state-dir /var/lib/barmkin]
                 [-client-group barmkin-clients] [-preregister-ttl 10s]
+                [-telemetry-config /etc/barmkin/monitor-telemetry.json]
 ```
 
 **Deployment.** Root installs and manages the monitor, which runs as a dedicated service user under a systemd unit with `User=`, `StateDirectory=` and `RuntimeDirectory=`. [`packaging/`](#packaging-the-managed-monitor-and-claude-code-seat) ships the unit. Root creates both directories. The monitor refuses to start when:
@@ -155,6 +156,32 @@ The journal is `0600`. The socket is `0660`, group `barmkin-clients`. The servic
 - Golden tests replay barmkin-mod's TypeScript against recorded mock Jev responses. No test calls Jev.
 
 **Journal.** A leg raise or registration is fsynced before the request is answered. At every start the monitor replays the journal and rewrites it as a compact snapshot. If the last run did not stop cleanly (a crash, `SIGKILL`, a torn tail or a damaged record), every known lineage gets its untrusted leg raised by `monitor_restart`. A damaged journal is moved aside as `journal.damaged-<time>`, and only its valid records are replayed. A private regular journal that cannot be read or is over the size limit is moved aside the same way and every session starts unknown. A symlink, a non-regular file, or a journal with the wrong owner or mode is never moved, and the monitor refuses to start. A deleted journal leaves every session unknown, so it denies until it registers again. If a change cannot be journaled, `health` reports `degraded` and every other operation fails `unavailable`.
+
+**Telemetry export.** The monitor can export its journal's state changes to an OpenTelemetry collector as OTLP/HTTP JSON log records (`internal/telemetry`). Export is off unless `-telemetry-config` names root's export configuration. The file must be a regular file owned by root that group and other cannot write, in directories owned by root that nobody else can write. The monitor refuses to start when the file fails those checks or does not parse:
+
+```json
+{
+  "endpoint": "http://127.0.0.1:4318/v1/logs",
+  "timeout_ms": 2000,
+  "queue_size": 1024,
+  "max_batch": 256,
+  "flush_interval_ms": 1000
+}
+```
+
+Only `endpoint` is required. It is the full logs URL, `http` or `https`, with no user information, query or fragment. The other fields show their defaults. There are no headers and no credentials.
+- **What is exported:** one record per change after the journal made it durable. The event codes are `barmkin.monitor.start` (with `barmkin.recovery`: `clean`, `unclean`, `damaged` or `unreadable`), `barmkin.monitor.shutdown`, `barmkin.monitor.degraded`, `barmkin.session.register` and `barmkin.lineage.raise` (with `barmkin.leg` and `barmkin.source`). Each record carries its time. Register and raise records also carry the host and `barmkin.lineage`, a pseudonym for the lineage: an HMAC of the uid, host and root token, under a key kept in the state directory as `telemetry.key` (`0600`). A lineage keeps its pseudonym across restarts. The resource names `service.name`, `service.version`, `barmkin.proto.version`, `barmkin.journal.record_version` and `barmkin.telemetry.schema`.
+- **What is never exported:** session tokens, uids, tool arguments, screened content, decisions, reasons, peer paths, credentials and journal bytes. The local journal stays the authoritative record.
+- **Never in the way:** a change is handed to the export only after its journal append returns. The hand-off never blocks. It goes to a bounded queue, and an event that does not fit is dropped and counted. One worker posts batches with a deadline, and never retries or follows a redirect. A collector that is down, slow, refuses a batch or answers with something malformed costs only that batch, which is counted as failed. The next batch the collector accepts carries a `barmkin.export.loss` record with the counts dropped and failed since the last report. The monitor logs when the export starts and stops failing. Decisions, the journal and the gate do not depend on the collector. At shutdown the queue gets one last attempt, bounded by `timeout_ms`.
+
+The packaged unit allows only Unix sockets, so export needs a drop-in, for example `/etc/systemd/system/barmkin-monitor.service.d/telemetry.conf`:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/barmkin monitor -socket /run/barmkin/monitor.sock -state-dir /var/lib/barmkin -client-group barmkin-clients -telemetry-config /etc/barmkin/monitor-telemetry.json
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+```
 
 ## Local monitor (foundation)
 
