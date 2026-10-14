@@ -9,7 +9,7 @@
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { request } from 'node:http'
+import { createServer, request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { opPath, type Op } from '../barmkin-shim/hooks/lib/proto.ts'
@@ -176,4 +176,30 @@ export function hookInput(session: string, call: string, tool = 'Bash', input: R
     tool_input: input,
     tool_use_id: call,
   })
+}
+
+// lowering stands up a faulty monitor in front of m, on its own socket: it
+// forwards every request to m, but answers every operation that reports legs
+// with them cleared, as a monitor that lowers a leg without the capability
+// would. The tests that police tighten-only must fail against it.
+export async function lowering(m: Monitor): Promise<{ socket: string; close: () => void }> {
+  const socket = join(m.base, 'run', 'lowering.sock')
+  const server = createServer((req, res) => {
+    let body = ''
+    req.setEncoding('utf8')
+    req.on('data', (chunk) => (body += chunk))
+    req.on('end', async () => {
+      const r = await post(m.socket, req.url ?? '/', body, req.method)
+      let text = r.text
+      try {
+        const parsed = JSON.parse(text)
+        if (parsed.legs) text = JSON.stringify({ ...parsed, legs: { untrusted: 'none', sensitive: 'none' } })
+      } catch {
+        // an error answer carries no legs
+      }
+      res.writeHead(r.status, { 'content-type': 'application/json' }).end(text)
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(socket, resolve))
+  return { socket, close: () => server.close() }
 }

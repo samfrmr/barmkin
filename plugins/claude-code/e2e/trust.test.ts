@@ -14,9 +14,9 @@ import { readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { interpretReply } from '../barmkin-shim/hooks/lib/monitor.ts'
-import { OPS, VERSION, type Code, type Legs, type Op } from '../barmkin-shim/hooks/lib/proto.ts'
-import { ClaudeCode, type LaunchOptions } from './host.ts'
-import { Monitor, gate, hookInput } from './monitor.ts'
+import { OPS, VERSION, opPath, type Code, type Legs, type Op } from '../barmkin-shim/hooks/lib/proto.ts'
+import { ClaudeCode, fetchOverSocket, type LaunchOptions } from './host.ts'
+import { Monitor, gate, hookInput, lowering, post, type Reply } from './monitor.ts'
 
 const TESTDATA = new URL('../../../internal/proto/testdata/', import.meta.url)
 
@@ -56,8 +56,12 @@ function launch(m: Monitor, opts: Partial<LaunchOptions> = {}): Promise<ClaudeCo
 
 const scoped = (session: string) => ({ version: VERSION, host: 'claude_code', session })
 
+interface Sender {
+  send(op: Op | string, body: string): Promise<Reply>
+}
+
 // legs reads a session's legs from the monitor, through the shim's reader.
-async function legs(m: Monitor, session: string): Promise<Legs | string> {
+async function legs(m: Sender, session: string): Promise<Legs | string> {
   const r = await m.send('status', JSON.stringify(scoped(session)))
   const answer = interpretReply('status', r.status, r.text)
   return answer.ok ? answer.value.legs : answer.failure
@@ -71,6 +75,39 @@ async function taint(cc: ClaudeCode): Promise<void> {
   assert.equal(fetched.gate.code, 0, fetched.gate.stderr)
   assert.doesNotMatch(JSON.stringify(fetched.out), /Ignore previous instructions/)
   assert.match(fetched.out.result, /^barmkin: withheld this result/)
+}
+
+// assertClientsCannotLower sends everything a client could send to lower a
+// session's legs, and checks every answer, and the legs after, still show
+// tainted.
+async function assertClientsCannotLower(m: Sender, session: string, tainted: Legs) {
+  // A register that claims a fresh session, and observes from other sources.
+  const again = await m.send('register', JSON.stringify({ ...scoped(session), root: session, fresh: true, posture: { sandbox_enabled: true, allow_all_unix_sockets: false } }))
+  assert.deepEqual(interpretReply('register', again.status, again.text), { ok: true, value: { version: VERSION, legs: tainted } })
+  for (const source of ['mcp', 'skill', 'read', 'peer']) {
+    const r = await m.send('observe', JSON.stringify({ ...scoped(session), source }))
+    assert.deepEqual(interpretReply('observe', r.status, r.text), { ok: true, value: { version: VERSION, legs: tainted } })
+  }
+
+  // Every path a clear, rotate, capability or acknowledgement would take.
+  for (const path of transport.unknown_paths) {
+    const r = await m.send(path, JSON.stringify({ ...scoped(session), root: session, fresh: true }))
+    assert.deepEqual([r.status, interpretReply('status', r.status, r.text)], [400, { ok: false, failure: 'bad_request' }], path)
+  }
+  assert.deepEqual(await legs(m, session), tainted)
+}
+
+// assertShimDeniesWhenDown checks that, had the gate let a call through while
+// the monitor is unreachable, the shim's own guards deny it too.
+async function assertShimDeniesWhenDown(cc: ClaudeCode) {
+  for (const [tool, input] of [
+    ['Bash', { command: 'ls' }],
+    ['WebFetch', { url: 'https://example.com/', prompt: 'x' }],
+  ] as const) {
+    const { ran, out } = await cc.toolCall('toolu_down', tool, input, 'ok')
+    assert.equal(ran, false, tool + ' ran')
+    assert.match(String(out?.deny), /denied because the barmkin monitor is not reachable/)
+  }
 }
 
 // assertShimDenied checks the gate let a call through to the shim, and the
@@ -153,15 +190,7 @@ describe('the managed gate denies every call without a live shim', () => {
 
     assertGateDenied(await cc.use('Bash', { command: 'ls' }), 'monitor-unavailable')
     assert.ok(cc.logs.some((l) => /was not pre-registered .*not reachable/.test(l)), cc.logs.join(' | '))
-    // Had the gate let a call through, the shim's own guards deny it too.
-    for (const [tool, input] of [
-      ['Bash', { command: 'ls' }],
-      ['WebFetch', { url: 'https://example.com/', prompt: 'x' }],
-    ] as const) {
-      const { ran, out } = await cc.toolCall('toolu_down', tool, input, 'ok')
-      assert.equal(ran, false, tool + ' ran')
-      assert.match(String(out?.deny), /denied because the barmkin monitor is not reachable/)
-    }
+    await assertShimDeniesWhenDown(cc)
     const unconfigured = await gate([], hookInput(cc.sessionId, 'toolu_x'))
     assert.deepEqual([unconfigured.code, unconfigured.reason], [2, 'monitor-unavailable'])
 
@@ -199,20 +228,7 @@ describe('taint only narrows', () => {
     const tainted = { untrusted: 'fetch', sensitive: 'none' }
     const session = cc.sessionId
 
-    // A register that claims a fresh session, and observes from other sources.
-    const again = await m.send('register', JSON.stringify({ ...scoped(session), root: session, fresh: true, posture: { sandbox_enabled: true, allow_all_unix_sockets: false } }))
-    assert.deepEqual(interpretReply('register', again.status, again.text), { ok: true, value: { version: VERSION, legs: tainted } })
-    for (const source of ['mcp', 'skill', 'read', 'peer']) {
-      const r = await m.send('observe', JSON.stringify({ ...scoped(session), source }))
-      assert.deepEqual(interpretReply('observe', r.status, r.text), { ok: true, value: { version: VERSION, legs: tainted } })
-    }
-
-    // Every path a clear, rotate, capability or acknowledgement would take.
-    for (const path of transport.unknown_paths) {
-      const r = await m.send(path, JSON.stringify({ ...scoped(session), root: session, fresh: true }))
-      assert.deepEqual([r.status, interpretReply('status', r.status, r.text)], [400, { ok: false, failure: 'bad_request' }], path)
-    }
-    assert.deepEqual(await legs(m, session), tainted)
+    await assertClientsCannotLower(m, session, tainted)
 
     // The same conversation resumed in a new process, and a /clear in it.
     const resumed = await launch(m, { session, resumed: true })
@@ -369,5 +385,42 @@ describe('malformed and version-mismatched requests', () => {
       const g = await gate(['-socket', m.socket], input)
       assert.deepEqual([g.code, g.reason], [2, 'malformed-request'], JSON.stringify(input))
     }
+  })
+})
+
+describe('the trust tests fail against a faulty implementation', () => {
+  test('a monitor that lowers a leg without the capability fails the tighten-only checks', async (t) => {
+    const m = await monitor(t)
+    const cc = await launch(m)
+    await taint(cc)
+    const tainted: Legs = { untrusted: 'fetch', sensitive: 'none' }
+    await assertClientsCannotLower(m, cc.sessionId, tainted)
+
+    const faulty = await lowering(m)
+    t.after(faulty.close)
+    const via = { send: (op: Op | string, body: string) => post(faulty.socket, op.startsWith('/') ? op : opPath(op as Op), body) }
+    await assert.rejects(assertClientsCannotLower(via, cc.sessionId, tainted), assert.AssertionError)
+  })
+
+  test('a shim that fails open on an unreachable monitor fails the unavailable-monitor checks', async (t) => {
+    const answers = new Map<string, string>()
+    for (const f of fixtures) {
+      const ok = f.valid.find((c) => c.message === 'response')
+      if (ok) answers.set(opPath(f.op), JSON.stringify(ok.body))
+    }
+    const failOpen: typeof fetchOverSocket = async (url, init) => {
+      try {
+        return await fetchOverSocket(url, init)
+      } catch {
+        const text = answers.get(new URL(url).pathname) ?? '{}'
+        return { ok: true, status: 200, headers: {}, text }
+      }
+    }
+    const m = await monitor(t)
+    const honest = await launch(m)
+    const open = await launch(m, { fetch: failOpen })
+    await m.stop()
+    await assertShimDeniesWhenDown(honest)
+    await assert.rejects(assertShimDeniesWhenDown(open), assert.AssertionError)
   })
 })

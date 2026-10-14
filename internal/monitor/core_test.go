@@ -449,3 +449,66 @@ func FuzzTightenOnly(f *testing.F) {
 func lowered(was, now proto.Source) bool {
 	return was != proto.SourceNone && was != now
 }
+
+// gatedJournal holds every Append until release is closed, as a journal
+// blocked in fsync is held.
+type gatedJournal struct {
+	memJournal
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (j *gatedJournal) Append(rs ...journal.Record) error {
+	j.entered <- struct{}{}
+	<-j.release
+	return j.memJournal.Append(rs...)
+}
+
+func TestNoAnswerBeforeTheJournalReturns(t *testing.T) {
+	observe := `{"version":1,"host":"claude_code","session":"s","source":"fetch"}`
+	screen := `{"version":1,"host":"claude_code","session":"s","source":"fetch","windows":["page"],"scores":{"injection":0,"credentials":0,"exfiltration":0}}`
+	registerUnknown := `{"version":1,"host":"claude_code","session":"u","root":"u","fresh":false,"posture":{"sandbox_enabled":true,"allow_all_unix_sockets":false}}`
+	for _, tc := range []struct{ name, path, body string }{
+		{"observe", "/v1/observe", observe},
+		{"screen", "/v1/screen", screen},
+		{"register of an unknown session", "/v1/register", registerUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := testCore(t)
+			mustRegister(t, c, alice, reg("s", "s", true))
+			j := &gatedJournal{entered: make(chan struct{}, 1), release: make(chan struct{})}
+			c.journal = j
+
+			answered := make(chan struct{})
+			go func() {
+				defer close(answered)
+				uid := alice
+				post(t, c, tc.path, tc.body, &uid)
+			}()
+			select {
+			case <-j.entered:
+			case <-answered:
+				t.Fatal("answered without journaling")
+			case <-time.After(5 * time.Second):
+				t.Fatal("never journaled")
+			}
+			select {
+			case <-answered:
+				t.Fatal("answered while the journal was still writing")
+			case <-time.After(100 * time.Millisecond):
+			}
+			if len(j.records) != 0 {
+				t.Fatal("records visible before the append returned")
+			}
+			close(j.release)
+			select {
+			case <-answered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("never answered after the journal returned")
+			}
+			if len(j.records) == 0 {
+				t.Error("answered with nothing journaled")
+			}
+		})
+	}
+}

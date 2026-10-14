@@ -72,7 +72,7 @@ interface FetchInit {
 
 // $.http.fetch with socketPath: one HTTP exchange over the Unix socket. It
 // rejects when nothing answers, as $.http.fetch does.
-function fetchOverSocket(url: string, init: FetchInit = {}): Promise<{ ok: boolean; status: number; headers: Record<string, string>; text: string }> {
+export function fetchOverSocket(url: string, init: FetchInit = {}): Promise<{ ok: boolean; status: number; headers: Record<string, string>; text: string }> {
   return new Promise((resolve, reject) => {
     const req = request(url, { method: init.method ?? 'GET', headers: init.headers, socketPath: init.socketPath }, (res) => {
       let text = ''
@@ -104,6 +104,8 @@ export interface LaunchOptions {
   sandboxed?: boolean
   // Extra flags for the managed gate, such as -monitor-uid.
   gateArgs?: string[]
+  // Replaces the shim's transport. Default: one HTTP exchange over the socket.
+  fetch?: typeof fetchOverSocket
 }
 
 export interface Use {
@@ -155,7 +157,7 @@ export class ClaudeCode {
           return { cancel: () => clearTimeout(t) }
         },
       },
-      http: { fetch: (url: string, init?: FetchInit) => fetchOverSocket(url, init) },
+      http: { fetch: opts.fetch ?? fetchOverSocket },
       ui: {
         log: (text: unknown) => void this.logs.push(String(text)),
         notice: () => undefined,
