@@ -1,4 +1,4 @@
-.PHONY: build test install clean validate
+.PHONY: build test install clean validate monitor-demo
 
 build:
 	go build -o barmkin .
@@ -11,6 +11,9 @@ install: build
 
 validate: build
 	./barmkin validate
+
+monitor-demo:
+	./scripts/monitor-demo.sh
 
 clean:
 	rm -f barmkin
