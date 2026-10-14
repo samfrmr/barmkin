@@ -4,7 +4,7 @@ Regex guardrail for AI coding agents. Each tool call goes through `barmkin eval`
 
 Runs as a subprocess per invocation. Config is a YAML file of regex rules.
 
-> **Successor fork.** This fork works toward a stateful barmkin successor. The legacy CLI (`barmkin eval`, installed by `install.sh`) is unchanged and works as described below. The [monitor](#monitor-core-barmkin-monitor) and the [Claude Code shim and managed gate](#claude-code-shim-and-managed-gate-demo) are a separate demo for a dedicated VM: `barmkin eval` does not use them, and `install.sh` does not set them up. [`packaging/`](#packaging-the-managed-monitor-and-claude-code-seat) installs them.
+> **Successor fork.** This fork works toward a stateful barmkin successor. The legacy CLI (`barmkin eval`, installed by `install.sh`) is unchanged and works as described below. The [monitor](#monitor-core-barmkin-monitor), the [Claude Code shim and managed gate](#claude-code-shim-and-managed-gate-demo) and the [OpenCode 2.x shim](#opencode-2x-shim-demo) are a separate demo for a dedicated VM: `barmkin eval` does not use them, and `install.sh` does not set them up. [`packaging/`](#packaging-the-managed-monitor-and-claude-code-seat) installs the monitor and the Claude Code seat.
 
 ## Scope
 
@@ -31,7 +31,7 @@ A PreToolUse hook in `~/.claude/settings.json` runs `barmkin eval` on every `Bas
 
 ### opencode
 
-The plugin at `plugins/barmkin.ts` spawns `barmkin eval` on every `tool.execute.before` event. Installed to `~/.config/opencode/plugins/`.
+The plugin at `plugins/barmkin.ts` spawns `barmkin eval` on every `tool.execute.before` event. Installed to `~/.config/opencode/plugins/`. It has the OpenCode 1.x plugin shape, which OpenCode 2.x rejects; the [OpenCode 2.x shim](#opencode-2x-shim-demo) is separate.
 
 ## Commands
 
@@ -414,3 +414,15 @@ Start `claude` as a member of `barmkin-clients` and confirm that tool calls run.
 The lock holds against the demo user's own settings, mods and plugins. It does not hold against root, who can rewrite the managed settings.
 
 `claude plugin validate plugins/claude-code` checks the marketplace and plugin manifests.
+
+## OpenCode 2.x shim (demo)
+
+[`shims/opencode`](shims/opencode/README.md) is the successor's guard for OpenCode 2.x: a plugin, `barmkin-opencode`, ported from barmkin-mod's OpenCode plugin, that talks to `barmkin monitor` over its socket. It is a partial port, not equivalent to the Claude Code seat: OpenCode 2 has no administrator-locked plugin seat and no managed gate, so a session without the plugin runs unguarded. Its README names what it does not cover.
+
+- **Sessions.** Each OpenCode session registers as a monitor session in its root session's lineage, so a subagent shares its parent's legs. The taint lives in the monitor, so an OpenCode restart keeps it, and a monitor `kill -9` brings every lineage back tainted by `monitor_restart`. The taint is sticky; there is no clear command.
+- **Calls.** The plugin classifies every tool call into egress class ids and the monitor decides; it rechecks the final command, URL or path at OpenCode's permission step. Untrusted content goes to the monitor's screen as redacted windows, and the monitor core, which has no screen yet, makes the plugin withhold it.
+- **MCP.** Hidden text in an MCP server's descriptions, schemas or instructions is a finding kept under a hash of the server's configuration. It taints only the sessions that list or call that server, not every session on the instance.
+- **Shell layer.** OpenCode's `shell.create.before` names no session. The plugin denies a command there only when every session with a shell tool call in flight would deny it, and leaves the rest to the permission step's session-aware recheck.
+- **Failure denies.** An unreachable, hung or mismatched monitor denies every tool call. OpenCode 2 runs its tools outside any sandbox, so the monitor refuses its sessions (`posture_refused`) unless the plugin's `sandboxed` option says OpenCode runs inside an OS sandbox whose tools cannot reach the socket.
+
+The suite runs on Bun 1.4.2 (`cd shims/opencode && bun test`), against a model of the OpenCode host, the Claude Code shim's in-memory monitor on a real socket, and, with `BARMKIN_TEST_BIN`, a real `barmkin monitor`. CI runs it in its own job.
