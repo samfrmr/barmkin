@@ -1,4 +1,4 @@
-.PHONY: build test install clean validate monitor-demo claude-gate-demo claude-lock-lab shim-test e2e managed-install managed-uninstall packaging-test-ubuntu packaging-test-nixos
+.PHONY: build test install clean validate claude-gate-demo claude-lock-lab shim-test e2e managed-install managed-uninstall packaging-test-ubuntu packaging-test-nixos
 
 build:
 	go build -o barmkin .
@@ -7,7 +7,7 @@ test:
 	go test ./... -v
 
 install: build
-	sudo ./install.sh
+	./install.sh
 
 # The root-managed monitor and managed Claude Code seat (packaging/).
 managed-install:
@@ -25,9 +25,6 @@ packaging-test-nixos:
 
 validate: build
 	./barmkin validate
-
-monitor-demo:
-	./scripts/monitor-demo.sh
 
 claude-gate-demo:
 	./scripts/claude-gate-demo.sh

@@ -3,7 +3,7 @@
 // invisible-text scrub, the egress classes, the screen's local inputs and the
 // MCP and skill guards. One copy serves both hosts, so a fix to the policy
 // lands in both; this file is the one place that names its path. The bundle
-// (see README "Build the bundle") inlines it.
+// (see RELEASE-CHECKLIST.md "Build the bundle") inlines it.
 
 export { REDACTION_RULES } from '../../../plugins/claude-code/barmkin-shim/hooks/lib/redaction-rules'
 export {
