@@ -2,23 +2,29 @@
 # Runs the Claude Code shim-presence lab fixture end to end and asserts
 # every step.
 #
-# Builds barmkin and barmkin-monitor into a temporary directory and serves
-# the monitor there. Each simulated tool call feeds one PreToolUse hook
-# input to the managed `barmkin gate`. When the shim is "loaded", the same
-# call is registered as the shim's hooks module registers it (the same
-# content-free POST /v1/register, sent with `barmkin-monitor send`) and
-# still in flight as the gate starts. It shows that a call without a live
-# shim registration (no shim, broken shim, replayed, expired, malformed,
-# monitor down) is denied with exit 2, and that a registered call reaches
-# the monitor and is allowed. Exits non-zero on the first unexpected
-# result. Nothing outside the temporary directory is touched.
+# Builds barmkin into a temporary directory and serves `barmkin monitor`
+# there, in a deployment laid out for the current user. Each simulated tool
+# call feeds one PreToolUse hook input to the managed `barmkin gate`. When
+# the shim is "loaded", the session is registered and the call
+# pre-registered as the shim's hooks module does it (the same content-free
+# register and preregister requests of internal/proto, sent with curl over
+# the socket), with the pre-registration still in flight as the gate
+# starts. It shows that a call without a live pre-registration (no shim,
+# broken shim, replayed, expired, malformed, refused posture, monitor down)
+# is denied with exit 2, and that a pre-registered call reaches the monitor
+# and is allowed. Exits non-zero on the first unexpected result. Nothing
+# outside the temporary directory is touched.
 #
-# The shim module itself only runs inside Claude Code: its own tests are
-# plugins/claude-code/barmkin-shim.test.ts, and scripts/claude-lock-lab.sh
+# The shim module itself only runs inside Claude Code: its own tests run
+# under `claude plugin test` (make shim-test), and scripts/claude-lock-lab.sh
 # runs it in live sessions under the full managed lock.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+for tool in curl go; do
+	command -v "$tool" >/dev/null || { echo "SKIP: $tool not found" >&2; exit 77; }
+done
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/bmk.XXXXXX")
 # Unix socket paths are limited to ~108 bytes.
@@ -26,8 +32,11 @@ if (( ${#work} > 80 )); then
 	rmdir "$work"
 	work=$(mktemp -d /tmp/bmk.XXXXXX)
 fi
-sock=$work/monitor.sock
-journal=$work/taint.journal
+# The monitor's deployment: a runtime directory for the socket and a state
+# directory for the journal, both the service user's (here, this user).
+mkdir -m 0750 "$work/run"
+mkdir -m 0700 "$work/state"
+sock=$work/run/monitor.sock
 ttl=1s
 pid=
 
@@ -57,14 +66,23 @@ expect() {
 	fi
 }
 
+# post <op> <body> [socket]: one contract request; prints the HTTP status
+# and the body.
+post() {
+	curl -sS --max-time 2 --unix-socket "${3:-$sock}" -H 'content-type: application/json' \
+		-w ' %{http_code}' --data "$2" "http://barmkin/v1/$1"
+}
+
 start_monitor() {
-	"$work/barmkin-monitor" serve -socket "$sock" -journal "$journal" -presence-ttl "$ttl" 2>>"$work/serve.log" &
+	"$work/barmkin" monitor -socket "$sock" -state-dir "$work/state" -client-group "$(id -gn)" \
+		-preregister-ttl "$ttl" 2>>"$work/monitor.log" &
 	pid=$!
 	for _ in $(seq 50); do
-		"$work/barmkin-monitor" decide -socket "$sock" -session ready-probe -operation routine >/dev/null 2>&1 && return 0
+		[[ $(post health '{"version":1}' 2>/dev/null) == *'"state":"ok"'*' 200' ]] && return 0
 		sleep 0.1
 	done
 	echo "FAIL: monitor did not answer on $sock" >&2
+	sed 's/^/  /' "$work/monitor.log" >&2
 	exit 1
 }
 
@@ -76,17 +94,22 @@ hook() {
 
 gate() { "$work/barmkin" gate -socket "$sock"; }
 
-# shim <session> <call> [socket]: registers the call as the shim module
+# shim_session <session> [socket] [sandboxed]: registers the session as the
+# shim does at session start, with the posture it reads from settings.
+shim_session() {
+	post register "{\"version\":1,\"host\":\"claude_code\",\"session\":\"$1\",\"root\":\"$1\",\"fresh\":true,\"posture\":{\"sandbox_enabled\":${3:-true},\"allow_all_unix_sockets\":false}}" "${2:-$sock}"
+}
+
+# shim <session> <call> [socket]: pre-registers the call as the shim module
 # does. Like the shim, it never fails the call itself.
 shim() {
-	"$work/barmkin-monitor" send -socket "${3:-$sock}" -path /v1/register \
-		-body "{\"version\":1,\"session\":\"$1\",\"call\":\"$2\"}" >/dev/null 2>&1 || true
+	post preregister "{\"version\":1,\"host\":\"claude_code\",\"session\":\"$1\",\"call\":\"$2\"}" "${3:-$sock}" >/dev/null 2>&1 || true
 }
 
 # call_without_shim <input>: only the managed gate runs (plugin not loaded).
 call_without_shim() { gate <<<"$1"; }
 
-# call_with_shim <session> <call> [shim-socket]: the shim registers the
+# call_with_shim <session> <call> [shim-socket]: the shim pre-registers the
 # call and the gate starts while that request may still be in flight.
 call_with_shim() {
 	local sp rc=0
@@ -99,50 +122,59 @@ call_with_shim() {
 
 echo "== build"
 go build -o "$work/barmkin" .
-go build -o "$work/barmkin-monitor" ./cmd/barmkin-monitor
-echo "  $work/barmkin  $work/barmkin-monitor"
+echo "  $work/barmkin"
 
-echo "== start monitor (presence TTL $ttl)"
+echo "== start monitor (pre-registration TTL $ttl)"
 start_monitor
 
 echo "== shim not loaded"
-expect 2 unregistered        "unknown call, no shim, denies"              call_without_shim "$(hook sess-a toolu_01)"
+expect 2 unknown-session     "session never registered denies"            call_without_shim "$(hook sess-a toolu_01)"
 
 echo "== shim loaded"
-expect 0 -                   "registered call allows"                     call_with_shim sess-a toolu_02
-expect 0 -                   "next registered call allows"                call_with_shim sess-a toolu_03
-expect 2 unregistered        "replayed call denies (registration used)"   call_without_shim "$(hook sess-a toolu_03)"
-expect 2 unregistered        "same call id, other session, denies"        call_without_shim "$(hook sess-b toolu_02)"
+[[ $(shim_session sess-a) == *'"untrusted":"none"'*' 200' ]] || { echo "FAIL: sess-a did not register clean" >&2; exit 1; }
+expect 0 -                   "pre-registered call allows"                 call_with_shim sess-a toolu_02
+expect 0 -                   "next pre-registered call allows"            call_with_shim sess-a toolu_03
+expect 2 unregistered        "replayed call denies (pre-registration used)" call_without_shim "$(hook sess-a toolu_03)"
+expect 2 unregistered        "call the shim never saw denies"             call_without_shim "$(hook sess-a toolu_04)"
+expect 2 unknown-session     "same call id, other session, denies"        call_without_shim "$(hook sess-b toolu_02)"
 
 echo "== shim broken (wrong socket)"
-expect 2 unregistered        "unregistered call denies"                   call_with_shim sess-a toolu_04 "$work/elsewhere.sock"
+expect 2 unregistered        "unregistered call denies"                   call_with_shim sess-a toolu_05 "$work/elsewhere.sock"
 
-echo "== registration expires"
-shim sess-a toolu_05
+echo "== pre-registration expires"
+shim sess-a toolu_06
 sleep 1.5
-expect 2 expired             "call registered ${ttl} ago denies"          call_without_shim "$(hook sess-a toolu_05)"
+expect 2 unregistered        "call pre-registered ${ttl} ago denies"      call_without_shim "$(hook sess-a toolu_06)"
+
+echo "== posture refused"
+[[ $(shim_session sess-u "" false) == *'"error":"posture_refused"'*' 403' ]] || { echo "FAIL: an unsandboxed session registered" >&2; exit 1; }
+expect 2 unknown-session     "unsandboxed session's call denies"          call_with_shim sess-u toolu_07
 
 echo "== malformed hook input"
 expect 2 malformed-request   "no tool_use_id denies"                      call_without_shim '{"session_id":"sess-a","tool_name":"Bash"}'
-expect 2 malformed-request   "malformed tool_use_id denies"               call_without_shim "$(hook sess-a 'toolu 06')"
+expect 2 malformed-request   "malformed tool_use_id denies"               call_without_shim "$(hook sess-a 'toolu 08')"
 expect 2 malformed-request   "not JSON denies"                            call_without_shim 'Bash: ls'
 
 echo "== gate misconfigured"
-expect 2 monitor-unavailable "no socket configured denies"                env -u BARMKIN_MONITOR_SOCKET "$work/barmkin" gate <<<"$(hook sess-a toolu_07)"
+expect 2 monitor-unavailable "no socket configured denies"                env -u BARMKIN_MONITOR_SOCKET "$work/barmkin" gate <<<"$(hook sess-a toolu_09)"
 
 echo "== monitor down (SIGKILL)"
 kill -KILL "$pid"
 wait "$pid" 2>/dev/null || true
 pid=
-expect 2 monitor-unavailable "registered call denies while down"          call_with_shim sess-a toolu_08
+rm -f "$sock"
+expect 2 monitor-unavailable "pre-registered call denies while down"      call_with_shim sess-a toolu_10
 
 echo "== monitor restarted"
 start_monitor
-expect 0 -                   "registered call allows again"               call_with_shim sess-a toolu_09
-expect 2 unregistered        "unknown call still denies"                  call_without_shim "$(hook sess-a toolu_10)"
+[[ $(shim_session sess-a) == *'"untrusted":"monitor_restart"'*' 200' ]] ||
+	{ echo "FAIL: after an unclean stop, sess-a must come back tainted by monitor_restart" >&2; exit 1; }
+echo "  sess-a registers again with its untrusted leg raised by monitor_restart"
+expect 0 -                   "pre-registered call allows again"           call_with_shim sess-a toolu_11
+expect 2 unregistered        "unknown call still denies"                  call_without_shim "$(hook sess-a toolu_12)"
 
 echo "== monitor log"
-sed 's/^/  /' "$work/serve.log"
+sed 's/^/  /' "$work/monitor.log"
 
 kill -TERM "$pid"
 wait "$pid"

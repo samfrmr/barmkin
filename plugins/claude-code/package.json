@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test barmkin-shim.test.ts"
+    "validate": "claude plugin validate --strict barmkin-shim",
+    "test": "claude plugin test barmkin-shim"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.289"
   }
 }

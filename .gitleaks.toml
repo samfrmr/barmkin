@@ -12,3 +12,34 @@ regexes = [
   '''^ghp_AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII$''',
   '''^xoxb-1234567890-abcdefghij$''',
 ]
+
+# The Claude Code shim's redaction layer (plugins/claude-code/barmkin-shim,
+# ported from barmkin-mod) carries credential-shaped strings on purpose, as
+# rule examples and test fixtures. Each allowance below names one synthetic
+# value, matched by the value itself, not by path or rule, as barmkin-mod's
+# own .gitleaks.toml allows them, so a real credential beside a fixture is
+# still caught.
+[[allowlists]]
+description = "Generic key/assignment fixtures in the shim's tests/redaction.test.ts, tests/integration.test.ts, tests/linear-scanners.test.ts, tests/scanned-prefix.test.ts and hooks/lib/redaction-rules.ts"
+regexes = [
+  '''^abcdefgh12345678$''',
+  '''^abcdef0123456789$''',
+  '''^API_KEY=abcdef0123456789$''',
+  '''^abcdef0123456789abcd$''',
+  '''^abcdef0123456789abcd\.secretTAIL99$''',
+  '''^abc123def456ghi789jk$''',
+  '''^xK9mP2qL7vN4wR8tY3uI$''',
+  '''^f3b9c0d8a7e6152493ab$''',
+]
+
+[[allowlists]]
+description = "Stripe's documented example key (the shim's hooks/lib/redaction-rules.ts, tests/redaction.test.ts)"
+regexes = ['''^sk_live_4eC39HqLyjWDarjtT1zdp7dc$''']
+
+[[allowlists]]
+description = "AWS documentation example key with its last character changed (the shim's tests/redaction.test.ts)"
+regexes = ['''^AKIAIOSFODNN7EXAMPLF$''']
+
+[[allowlists]]
+description = "jwt.io example token (the shim's hooks/lib/redaction-rules.ts, tests/redaction.test.ts, tests/linear-scanners.test.ts)"
+regexes = ['''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U$''']

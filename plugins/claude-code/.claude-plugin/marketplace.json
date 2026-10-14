@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "barmkin-shim",
-      "description": "Registers every tool call with the local barmkin monitor so the managed barmkin gate allows it",
+      "description": "Barmkin's Claude Code shim, connected to the local barmkin monitor, which holds the session's sticky taint",
       "source": "./barmkin-shim",
       "author": {
         "name": "barmkin"

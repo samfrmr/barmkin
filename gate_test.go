@@ -5,18 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/Daviey/barmkin/monitor"
+	imonitor "github.com/Daviey/barmkin/internal/monitor"
+	"github.com/Daviey/barmkin/internal/proto"
 )
 
 // shortGateTimes shrinks the gate's waits so tests stay fast.
@@ -48,25 +52,63 @@ func gateSocketDir(t *testing.T) string {
 	return dir
 }
 
-// startMonitor serves a real monitor and returns its socket path.
+// monitorDeployment lays out a root-managed monitor deployment for the
+// current user (internal/monitor's Start checks it), under a short path
+// that fits a socket address.
+func monitorDeployment(t *testing.T, ttl time.Duration) imonitor.Config {
+	t.Helper()
+	base := gateSocketDir(t)
+	for dir, mode := range map[string]os.FileMode{"run": 0o750, "state": 0o700} {
+		p := filepath.Join(base, dir)
+		if err := os.Mkdir(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g, err := user.LookupGroupId(strconv.Itoa(os.Getgid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return imonitor.Config{
+		Socket:         filepath.Join(base, "run", "monitor.sock"),
+		StateDir:       filepath.Join(base, "state"),
+		ClientGroup:    g.Name,
+		PreregisterTTL: ttl,
+	}
+}
+
+// serveMonitor serves a real barmkin monitor (internal/monitor) until the
+// returned stop is called or the test ends.
+func serveMonitor(t *testing.T, cfg imonitor.Config) (stop func()) {
+	t.Helper()
+	m, err := imonitor.Start(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- m.Serve(ctx) }()
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			if err := <-done; err != nil {
+				t.Errorf("monitor: %v", err)
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// startMonitor serves a real barmkin monitor and returns its socket path.
 func startMonitor(t *testing.T, ttl time.Duration) string {
 	t.Helper()
-	dir := gateSocketDir(t)
-	j, records, err := monitor.OpenJournal(filepath.Join(dir, "taint.journal"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sock := filepath.Join(dir, "m.sock")
-	ln, err := monitor.Listen(sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := monitor.NewServer(j, records)
-	s.SetPresenceTTL(ttl)
-	srv := monitor.NewHTTPServer(s)
-	go srv.Serve(ln)
-	t.Cleanup(func() { srv.Close(); j.Close() })
-	return sock
+	cfg := monitorDeployment(t, ttl)
+	serveMonitor(t, cfg)
+	return cfg.Socket
 }
 
 // startFakeMonitor answers every request on a Unix socket with handler.
@@ -111,40 +153,87 @@ func gateWith(t *testing.T, args []string, stdin io.Reader, getenv func(string) 
 	return code, stderr.String()
 }
 
-func wantDeny(t *testing.T, code int, stderr string, reason monitor.Reason) {
+func wantDeny(t *testing.T, code int, stderr string, reason gateReason) {
 	t.Helper()
 	if code != 2 || !strings.Contains(stderr, `"decision":"deny","reason":"`+string(reason)+`"`) {
 		t.Fatalf("exit %d %q, want deny/%s", code, stderr, reason)
 	}
 }
 
-func register(t *testing.T, sock, session, call string) {
+// post sends one contract request to the monitor as a shim does, and
+// decodes its success response into resp.
+func post(t *testing.T, sock string, op proto.Op, req, resp proto.Message) {
 	t.Helper()
-	if _, err := monitor.NewClient(sock, time.Second).Register(context.Background(), session, call); err != nil {
+	if err := tryPost(sock, op, req, resp); err != nil {
 		t.Fatal(err)
 	}
 }
 
+func tryPost(sock string, op proto.Op, req, resp proto.Message) error {
+	body, err := proto.Encode(req)
+	if err != nil {
+		return err
+	}
+	c := http.Client{Timeout: time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	}}}
+	r, err := c.Post("http://barmkin"+op.Path(), "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+	data, _ := io.ReadAll(r.Body)
+	if r.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: HTTP %d %s", op, r.StatusCode, data)
+	}
+	if err := proto.Decode(data, resp); err != nil {
+		return fmt.Errorf("%s: %v in %s", op, err, data)
+	}
+	return nil
+}
+
+func preregisterRequest(session, call string) *proto.PreregisterRequest {
+	return &proto.PreregisterRequest{Version: proto.Version, Host: proto.HostClaudeCode, Session: session, Call: call}
+}
+
+// registerSession registers a fresh, sandboxed session, as the shim does
+// at session start.
+func registerSession(t *testing.T, sock, session string) {
+	t.Helper()
+	post(t, sock, proto.OpRegister, &proto.RegisterRequest{
+		Version: proto.Version, Host: proto.HostClaudeCode, Session: session, Root: session, Fresh: true,
+		Posture: proto.Posture{SandboxEnabled: true},
+	}, &proto.RegisterResponse{})
+}
+
+// register pre-registers a call in a registered session, as the shim does
+// from session.append, registering the session first.
+func register(t *testing.T, sock, session, call string) {
+	t.Helper()
+	registerSession(t, sock, session)
+	post(t, sock, proto.OpPreregister, preregisterRequest(session, call), &proto.PreregisterResponse{})
+}
+
 func TestGateAllowsRegisteredCallOnce(t *testing.T) {
 	shortGateTimes(t)
-	sock := startMonitor(t, monitor.PresenceTTL)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
 	register(t, sock, "sess-a", "toolu_01A")
 
 	if code, stderr := gate(t, sock, hookInput("sess-a", "toolu_01A")); code != 0 || stderr != "" {
 		t.Fatalf("registered call: exit %d %q", code, stderr)
 	}
 	code, stderr := gate(t, sock, hookInput("sess-a", "toolu_01A"))
-	wantDeny(t, code, stderr, monitor.ReasonUnregistered)
+	wantDeny(t, code, stderr, gateUnregistered)
 }
 
 func TestGateDeniesUnregisteredCall(t *testing.T) {
 	shortGateTimes(t)
-	sock := startMonitor(t, monitor.PresenceTTL)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
 	register(t, sock, "sess-a", "toolu_01A")
 
 	start := time.Now()
 	code, stderr := gate(t, sock, hookInput("sess-a", "toolu_01B"))
-	wantDeny(t, code, stderr, monitor.ReasonUnregistered)
+	wantDeny(t, code, stderr, gateUnregistered)
 	if elapsed := time.Since(start); elapsed < gateTimes.wait/2 || elapsed > gateTimes.deadline {
 		t.Fatalf("gate gave up after %s, want about %s", elapsed, gateTimes.wait)
 	}
@@ -152,10 +241,11 @@ func TestGateDeniesUnregisteredCall(t *testing.T) {
 
 func TestGateWaitsForLateRegistration(t *testing.T) {
 	shortGateTimes(t)
-	sock := startMonitor(t, monitor.PresenceTTL)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
+	registerSession(t, sock, "sess-a")
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		monitor.NewClient(sock, time.Second).Register(context.Background(), "sess-a", "toolu_01A")
+		tryPost(sock, proto.OpPreregister, preregisterRequest("sess-a", "toolu_01A"), &proto.PreregisterResponse{})
 	}()
 	if code, stderr := gate(t, sock, hookInput("sess-a", "toolu_01A")); code != 0 {
 		t.Fatalf("late registration: exit %d %q", code, stderr)
@@ -168,12 +258,31 @@ func TestGateDeniesExpiredCall(t *testing.T) {
 	register(t, sock, "sess-a", "toolu_01A")
 	time.Sleep(100 * time.Millisecond)
 	code, stderr := gate(t, sock, hookInput("sess-a", "toolu_01A"))
-	wantDeny(t, code, stderr, monitor.ReasonExpired)
+	wantDeny(t, code, stderr, gateUnregistered)
+}
+
+// A session the shim never registered is unknown to the monitor: the gate
+// denies at once, without waiting, and the same call id from another
+// session never borrows a pre-registration.
+func TestGateDeniesUnknownSession(t *testing.T) {
+	shortGateTimes(t)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
+	register(t, sock, "sess-a", "toolu_01A")
+
+	start := time.Now()
+	code, stderr := gate(t, sock, hookInput("sess-b", "toolu_01A"))
+	wantDeny(t, code, stderr, gateUnknownSession)
+	if elapsed := time.Since(start); elapsed > gateTimes.wait/2 {
+		t.Fatalf("unknown session took %s; it is final, not waited on", elapsed)
+	}
+	if code, stderr := gate(t, sock, hookInput("sess-a", "toolu_01A")); code != 0 {
+		t.Fatalf("the other session's call consumed it: exit %d %q", code, stderr)
+	}
 }
 
 func TestGateDeniesMalformedInput(t *testing.T) {
 	shortGateTimes(t)
-	sock := startMonitor(t, monitor.PresenceTTL)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
 	register(t, sock, "sess-a", "toolu_01A")
 	cases := map[string]string{
 		"empty":             ``,
@@ -188,7 +297,7 @@ func TestGateDeniesMalformedInput(t *testing.T) {
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
 			code, stderr := gate(t, sock, in)
-			wantDeny(t, code, stderr, monitor.ReasonMalformedRequest)
+			wantDeny(t, code, stderr, gateMalformedRequest)
 		})
 	}
 	// None of them reached or consumed the registration.
@@ -199,20 +308,20 @@ func TestGateDeniesMalformedInput(t *testing.T) {
 
 func TestGateDeniesStalledStdin(t *testing.T) {
 	shortGateTimes(t)
-	sock := startMonitor(t, monitor.PresenceTTL)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
 	r, w := io.Pipe()
 	defer w.Close()
 	code, stderr := gateWith(t, []string{"-socket", sock}, r, func(string) string { return "" })
-	wantDeny(t, code, stderr, monitor.ReasonMalformedRequest)
+	wantDeny(t, code, stderr, gateMalformedRequest)
 }
 
 func TestGateDeniesOversizedInput(t *testing.T) {
 	shortGateTimes(t)
-	sock := startMonitor(t, monitor.PresenceTTL)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
 	big := io.MultiReader(strings.NewReader(`{"session_id":"sess-a","tool_use_id":"toolu_01A","x":"`),
 		io.LimitReader(zeros{}, gateMaxInput))
 	code, stderr := gateWith(t, []string{"-socket", sock}, big, func(string) string { return "" })
-	wantDeny(t, code, stderr, monitor.ReasonMalformedRequest)
+	wantDeny(t, code, stderr, gateMalformedRequest)
 }
 
 type zeros struct{}
@@ -228,7 +337,7 @@ func TestGateDeniesUnreachableMonitor(t *testing.T) {
 	shortGateTimes(t)
 	absent := filepath.Join(gateSocketDir(t), "absent.sock")
 	code, stderr := gate(t, absent, hookInput("sess-a", "toolu_01A"))
-	wantDeny(t, code, stderr, monitor.ReasonMonitorUnavailable)
+	wantDeny(t, code, stderr, gateMonitorUnavailable)
 }
 
 func TestGateDeniesWithoutConfiguration(t *testing.T) {
@@ -237,16 +346,16 @@ func TestGateDeniesWithoutConfiguration(t *testing.T) {
 	noEnv := func(string) string { return "" }
 
 	code, stderr := gateWith(t, nil, strings.NewReader(in), noEnv)
-	wantDeny(t, code, stderr, monitor.ReasonMonitorUnavailable)
+	wantDeny(t, code, stderr, gateMonitorUnavailable)
 	code, stderr = gateWith(t, []string{"-bogus"}, strings.NewReader(in), noEnv)
-	wantDeny(t, code, stderr, monitor.ReasonMalformedRequest)
+	wantDeny(t, code, stderr, gateMalformedRequest)
 	code, stderr = gateWith(t, []string{"-socket", "x", "extra"}, strings.NewReader(in), noEnv)
-	wantDeny(t, code, stderr, monitor.ReasonMalformedRequest)
+	wantDeny(t, code, stderr, gateMalformedRequest)
 }
 
 func TestGateSocketFromEnvironment(t *testing.T) {
 	shortGateTimes(t)
-	sock := startMonitor(t, monitor.PresenceTTL)
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
 	register(t, sock, "sess-a", "toolu_01A")
 	env := func(k string) string {
 		if k == envMonitorSocket {
@@ -261,27 +370,29 @@ func TestGateSocketFromEnvironment(t *testing.T) {
 
 func TestGateDeniesMalformedOrStalledMonitor(t *testing.T) {
 	shortGateTimes(t)
+	reply := func(status int, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			io.WriteString(w, body)
+		}
+	}
 	cases := []struct {
 		name    string
 		handler http.HandlerFunc
-		reason  monitor.Reason
+		reason  gateReason
 	}{
-		{"allow without version", func(w http.ResponseWriter, _ *http.Request) {
-			io.WriteString(w, `{"decision":"allow","reason":"ok"}`)
-		}, monitor.ReasonMalformedResponse},
-		{"allow from future version", func(w http.ResponseWriter, _ *http.Request) {
-			io.WriteString(w, `{"version":2,"decision":"allow","reason":"ok"}`)
-		}, monitor.ReasonMalformedResponse},
-		{"allow with error status", func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-			io.WriteString(w, `{"version":1,"decision":"allow","reason":"ok"}`)
-		}, monitor.ReasonMalformedResponse},
-		{"plain text", func(w http.ResponseWriter, _ *http.Request) {
-			io.WriteString(w, `ok`)
-		}, monitor.ReasonMalformedResponse},
+		{"preregistered without version", reply(200, `{"preregistered":true}`), gateMalformedResponse},
+		{"preregistered from another version", reply(200, `{"version":2,"preregistered":true}`), gateVersionMismatch},
+		{"preregistered with an unknown field", reply(200, `{"version":1,"preregistered":true,"allow":true}`), gateMalformedResponse},
+		{"preregistered with an error status", reply(500, `{"version":1,"preregistered":true}`), gateMalformedResponse},
+		{"error code with the wrong status", reply(503, `{"version":1,"error":"unknown_session"}`), gateMalformedResponse},
+		{"version mismatch error", reply(400, `{"version":1,"error":"version_mismatch"}`), gateVersionMismatch},
+		{"unavailable error", reply(503, `{"version":1,"error":"unavailable"}`), gateMonitorUnavailable},
+		{"plain text", reply(200, `ok`), gateMalformedResponse},
+		{"never preregistered", reply(200, `{"version":1,"preregistered":false}`), gateUnregistered},
 		{"stalled", func(w http.ResponseWriter, r *http.Request) {
 			<-r.Context().Done()
-		}, monitor.ReasonMonitorUnavailable},
+		}, gateMonitorUnavailable},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -301,14 +412,14 @@ func TestGateSendsContentFreeRequests(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, r.URL.Path+" "+string(body))
-		io.WriteString(w, `{"version":1,"decision":"allow","reason":"ok"}`)
+		io.WriteString(w, `{"version":1,"preregistered":true}`)
 	})
 	if code, stderr := gate(t, sock, hookInput("sess-a", "toolu_01A")); code != 0 {
 		t.Fatalf("exit %d %q", code, stderr)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	want := `/v1/presence {"version":1,"session":"sess-a","call":"toolu_01A"}`
+	want := `/v1/gate {"version":1,"host":"claude_code","session":"sess-a","call":"toolu_01A"}`
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("requests %q, want [%q]", got, want)
 	}
@@ -357,8 +468,9 @@ func TestGateDeadlineUnderHookTimeouts(t *testing.T) {
 	}
 }
 
-// TestClaudeGateDemo runs scripts/claude-gate-demo.sh, which builds both
-// commands and drives shim-style registrations and the gate together.
+// TestClaudeGateDemo runs scripts/claude-gate-demo.sh, which builds
+// barmkin, serves `barmkin monitor`, and drives shim-style registrations
+// and the gate together.
 func TestClaudeGateDemo(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the monitor and gate as subprocesses")
@@ -368,6 +480,10 @@ func TestClaudeGateDemo(t *testing.T) {
 	}
 	out, err := exec.Command("bash", "scripts/claude-gate-demo.sh").CombinedOutput()
 	t.Logf("demo output:\n%s", out)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 77 {
+		t.Skip("demo prerequisites missing")
+	}
 	if err != nil {
 		t.Fatalf("demo failed: %v", err)
 	}
@@ -392,17 +508,71 @@ func TestClaudeLockLab(t *testing.T) {
 	}
 }
 
-// TestShimTypeScript runs the shim hooks module's node:test suite.
-func TestShimTypeScript(t *testing.T) {
+// TestShimMonitorContract runs the shim's monitor client code
+// (plugins/claude-code/monitor-contract.test.ts, under node) against a
+// real barmkin monitor. The shim's own suite runs under `claude plugin
+// test` against an in-memory monitor; this test holds that monitor's
+// decide to the real one.
+func TestShimMonitorContract(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not available")
 	}
-	cmd := exec.Command("node", "--test", "barmkin-shim.test.ts")
+	sock := startMonitor(t, imonitor.DefaultPreregisterTTL)
+	cmd := exec.Command("node", "--test", "monitor-contract.test.ts")
 	cmd.Dir = "plugins/claude-code"
+	cmd.Env = append(os.Environ(), "BARMKIN_TEST_MONITOR_SOCKET="+sock)
 	out, err := cmd.CombinedOutput()
 	t.Logf("node --test output:\n%s", out)
 	if err != nil {
-		t.Fatalf("shim tests failed: %v", err)
+		t.Fatalf("shim contract tests failed: %v", err)
+	}
+	if !bytes.Contains(out, []byte("skipped 0")) {
+		t.Fatal("contract tests were skipped")
+	}
+}
+
+// TestShimProtoMatchesCommon keeps the shim's copy of the contract's
+// TypeScript mirror identical to shims/common/proto.ts, the copy tested
+// against the shared fixtures. A plugin is installed as its own folder, so
+// it carries its own copy.
+func TestShimProtoMatchesCommon(t *testing.T) {
+	common, err := os.ReadFile("shims/common/proto.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim, err := os.ReadFile("plugins/claude-code/barmkin-shim/hooks/lib/proto.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(common, shim) {
+		t.Fatal("plugins/claude-code/barmkin-shim/hooks/lib/proto.ts differs from shims/common/proto.ts; copy it over")
+	}
+}
+
+// TestShimTaintSurvivesMonitorRestart walks the requests the shim sends
+// across a monitor restart: the session it registered keeps its taint, a
+// re-register (the shim's answer to any unknown_session) cannot lower it,
+// and the call it guards is still denied.
+func TestShimTaintSurvivesMonitorRestart(t *testing.T) {
+	cfg := monitorDeployment(t, imonitor.DefaultPreregisterTTL)
+	stop := serveMonitor(t, cfg)
+	sock := cfg.Socket
+	scoped := func() (int, proto.Host, string) { return proto.Version, proto.HostClaudeCode, "sess-r" }
+	registerSession(t, sock, "sess-r")
+	v, h, s := scoped()
+	post(t, sock, proto.OpObserve, &proto.ObserveRequest{Version: v, Host: h, Session: s, Source: proto.SourceFetch}, &proto.ObserveResponse{})
+	stop()
+
+	serveMonitor(t, cfg)
+	var reg proto.RegisterResponse
+	post(t, sock, proto.OpRegister, &proto.RegisterRequest{Version: v, Host: h, Session: s, Root: s, Posture: proto.Posture{SandboxEnabled: true}}, &reg)
+	if reg.Legs.Untrusted != proto.SourceFetch {
+		t.Fatalf("legs after restart %+v, want the fetch taint kept", reg.Legs)
+	}
+	var dec proto.DecideResponse
+	post(t, sock, proto.OpDecide, &proto.DecideRequest{Version: v, Host: h, Session: s, Classes: []proto.Class{proto.ClassShellOutward}}, &dec)
+	if dec.Verdict != proto.VerdictDeny {
+		t.Fatalf("decide after restart %+v, want deny", dec)
 	}
 }
 

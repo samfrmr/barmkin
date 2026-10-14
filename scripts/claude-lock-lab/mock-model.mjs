@@ -6,9 +6,11 @@
 // carrying "SCRIPT:<name>" gets, on its first turn, one Bash call per line
 // of <scripts-dir>/<name>.cmd (default: `echo ORIGINAL > markers/<name>.txt`),
 // or one Agent call whose prompt is "SCRIPT:<name>-sub" when
-// <scripts-dir>/<name>.agent exists. Once tool results are in the
-// conversation it ends the turn quoting them. Each request is logged as a
-// JSON line. Nothing here reaches the network.
+// <scripts-dir>/<name>.agent exists. A line "READ <path>" is a Read call
+// instead, and a line "---" ends one turn's calls: each later turn makes the
+// next group's calls. Once every group has run it ends the turn quoting the
+// tool results. Each request is logged as a JSON line. Nothing here reaches
+// the network.
 import { createServer } from "node:http"
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 
@@ -26,21 +28,29 @@ function plan(body) {
   const m = msgs.map((x) => text(x.content)).join("\n").match(/SCRIPT:([A-Za-z0-9_-]+)/)
   const tools = body.tools ?? []
   if (!m || !tools.some((t) => t.name === "Bash")) return { text: "ok" }
+  const name = m[1]
+  const f = `${scripts}/${name}.cmd`
+  const groups = (existsSync(f) ? readFileSync(f, "utf8") : `echo ORIGINAL > markers/${name}.txt`).split(/^---$/m)
+  const turn = msgs.filter((x) => x.role === "assistant" && Array.isArray(x.content) && x.content.some((b) => b.type === "tool_use")).length
   const results = msgs.flatMap((x) => (Array.isArray(x.content) ? x.content : [])).filter((b) => b.type === "tool_result")
-  if (results.length > 0) {
+  if (results.length > 0 && turn >= groups.length) {
     return { text: results.map((r) => `RESULT is_error=${!!r.is_error} ${JSON.stringify(r.content).slice(0, 400)}`).join(" || ") }
   }
-  const name = m[1]
   const id = () => `toolu_lab${String(++seq).padStart(4, "0")}`
   const agent = tools.find((t) => t.name === "Agent" || t.name === "Task")
-  if (agent && existsSync(`${scripts}/${name}.agent`)) {
+  if (turn === 0 && agent && existsSync(`${scripts}/${name}.agent`)) {
     return {
       uses: [{ id: id(), name: agent.name, input: { description: "lab subagent", prompt: `SCRIPT:${name}-sub go`, subagent_type: "general-purpose" } }],
     }
   }
-  const f = `${scripts}/${name}.cmd`
-  const commands = existsSync(f) ? readFileSync(f, "utf8").split("\n").filter(Boolean) : [`echo ORIGINAL > markers/${name}.txt`]
-  return { uses: commands.map((command) => ({ id: id(), name: "Bash", input: { command, description: "lab probe" } })) }
+  const lines = groups[Math.min(turn, groups.length - 1)].split("\n").filter(Boolean)
+  return {
+    uses: lines.map((line) =>
+      line.startsWith("READ ")
+        ? { id: id(), name: "Read", input: { file_path: line.slice(5) } }
+        : { id: id(), name: "Bash", input: { command: line, description: "lab probe" } },
+    ),
+  }
 }
 
 function stream(res, model, p) {
