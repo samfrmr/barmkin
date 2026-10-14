@@ -4,6 +4,8 @@ Regex guardrail for AI coding agents. Each tool call goes through `barmkin eval`
 
 Runs as a subprocess per invocation. Config is a YAML file of regex rules.
 
+> **Successor fork.** This fork works toward a stateful barmkin successor. The legacy CLI (`barmkin eval`, installed by `install.sh`) is unchanged and works as described below. The [local monitor](#local-monitor-foundation) and the [Claude Code managed gate](#claude-code-managed-gate-demo) are a separate demo for a dedicated VM: `barmkin eval` does not use them, and `install.sh` does not set them up.
+
 ## Scope
 
 Barmkin matches command strings. It does not read file contents or inspect command output. If you need semantic evaluation of what an agent writes or retrieves, use sondera, which adds Cedar policies and LLM classification on top.
