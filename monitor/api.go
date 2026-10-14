@@ -3,8 +3,9 @@
 //
 // The contract is versioned by path prefix (/v1/) and by an explicit
 // "version" field in every request and response body. It carries no
-// tool content - only an opaque session token and values from closed
-// enums - so the monitor never sees commands, file contents, or prompts.
+// tool content - only opaque session and tool-call tokens and values from
+// closed enums - so the monitor never sees commands, file contents, or
+// prompts.
 //
 // Every failure path is conservative: a malformed, unknown, unsupported,
 // or unanswerable request yields a deny, and a client that cannot reach
@@ -12,19 +13,26 @@
 //
 // Endpoints (v1):
 //
-//	POST /v1/decide  DecideRequest -> DecideResponse
-//	POST /v1/taint   TaintRequest  -> TaintResponse
+//	POST /v1/decide    DecideRequest   -> DecideResponse
+//	POST /v1/taint     TaintRequest    -> TaintResponse
+//	POST /v1/register  RegisterRequest -> RegisterResponse
+//	POST /v1/presence  PresenceRequest -> DecideResponse
 package monitor
 
-import "regexp"
+import (
+	"regexp"
+	"time"
+)
 
 // Version is the only contract version this package speaks.
 const Version = 1
 
 // Paths of the v1 endpoints.
 const (
-	PathDecide = "/v1/decide"
-	PathTaint  = "/v1/taint"
+	PathDecide   = "/v1/decide"
+	PathTaint    = "/v1/taint"
+	PathRegister = "/v1/register"
+	PathPresence = "/v1/presence"
 )
 
 // MaxBodyBytes bounds every request body. Requests are a few dozen bytes;
@@ -69,10 +77,14 @@ const (
 	ReasonUnknownSource      Reason = "unknown-source"
 	ReasonUnknownEndpoint    Reason = "unknown-endpoint"
 	ReasonJournalFailure     Reason = "journal-failure"
-	// ReasonMonitorUnavailable and ReasonMalformedResponse are produced by
-	// the client, never by the server.
+	ReasonUnregistered       Reason = "unregistered"
+	ReasonExpired            Reason = "expired"
+	ReasonCapacityExceeded   Reason = "capacity-exceeded"
+	// ReasonMonitorUnavailable, ReasonMalformedResponse and
+	// ReasonDeadlineExceeded are produced by clients, never by the server.
 	ReasonMonitorUnavailable Reason = "monitor-unavailable"
 	ReasonMalformedResponse  Reason = "malformed-response"
+	ReasonDeadlineExceeded   Reason = "deadline-exceeded"
 )
 
 // DecideRequest asks whether an operation may proceed in a session.
@@ -106,12 +118,49 @@ type TaintResponse struct {
 	Reason  Reason `json:"reason"`
 }
 
+// RegisterRequest records that a shim saw one tool call. The call token
+// is the agent's own opaque tool-call id; nothing about the call itself is
+// sent. A registration is held in memory only and lives for PresenceTTL.
+type RegisterRequest struct {
+	Version int    `json:"version"`
+	Session string `json:"session"`
+	Call    string `json:"call"`
+}
+
+// RegisterResponse acknowledges a RegisterRequest. Registered is true only
+// when the call is now live.
+type RegisterResponse struct {
+	Version    int    `json:"version"`
+	Registered bool   `json:"registered"`
+	Reason     Reason `json:"reason"`
+}
+
+// PresenceRequest asks whether a shim registered this call. It is answered
+// with a DecideResponse: allow only for a live registration, which the
+// answer consumes, so each registration admits exactly one call.
+type PresenceRequest struct {
+	Version int    `json:"version"`
+	Session string `json:"session"`
+	Call    string `json:"call"`
+}
+
+// PresenceTTL is how long a registration stays live by default. The shim
+// registers a call moments before the gate asks about it.
+const PresenceTTL = 10 * time.Second
+
+// MaxPresence bounds the live registrations a monitor holds.
+const MaxPresence = 4096
+
 // sessionPattern keeps session tokens opaque and content-free: short,
 // printable, and with no room to smuggle tool content.
 var sessionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 // ValidSession reports whether s is an acceptable session token.
 func ValidSession(s string) bool { return sessionPattern.MatchString(s) }
+
+// ValidCall reports whether s is an acceptable tool-call token. Call
+// tokens follow the same opaque, content-free shape as session tokens.
+func ValidCall(s string) bool { return sessionPattern.MatchString(s) }
 
 func (o Operation) known() bool { return o == OpRoutine || o == OpProtected }
 

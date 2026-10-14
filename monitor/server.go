@@ -14,17 +14,28 @@ import (
 	"time"
 )
 
-// Server answers v1 requests from in-memory taint state backed by a Journal.
+// Server answers v1 requests from in-memory taint state backed by a Journal,
+// and from in-memory shim registrations that are never journaled.
 type Server struct {
 	mu       sync.Mutex
 	journal  *Journal
 	tainted  map[string]bool
 	degraded bool // a taint could not be journaled; deny everything
+
+	presence    map[callKey]time.Time // live registrations and their expiry
+	presenceTTL time.Duration
+	now         func() time.Time
 }
 
 // NewServer builds a server from an open journal and its replayed records.
 func NewServer(j *Journal, records []Record) *Server {
-	s := &Server{journal: j, tainted: map[string]bool{}}
+	s := &Server{
+		journal:     j,
+		tainted:     map[string]bool{},
+		presence:    map[callKey]time.Time{},
+		presenceTTL: PresenceTTL,
+		now:         time.Now,
+	}
 	for _, r := range records {
 		s.tainted[r.Session] = true
 	}
@@ -38,6 +49,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleDecide(w, r)
 	case PathTaint:
 		s.handleTaint(w, r)
+	case PathRegister:
+		s.handleRegister(w, r)
+	case PathPresence:
+		s.handlePresence(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, denyResponse(ReasonUnknownEndpoint))
 	}

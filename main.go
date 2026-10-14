@@ -8,6 +8,8 @@
 // Usage:
 //
 //	barmkin eval        Read JSON from stdin, evaluate, exit 0 (allow) or 2 (deny)
+//	barmkin gate        Managed Claude Code PreToolUse check for shim presence
+//	                    (see gate.go), exit 0 (allow) or 2 (deny)
 //	barmkin test        Run built-in test vectors
 //	barmkin validate    Check config: rule names, patterns, examples
 //	barmkin stats       Aggregate decisions from the log file
@@ -43,7 +45,7 @@ const version = "1.0.0"
 var verbose bool
 
 func main() {
-	configPath, cmd := parseArgs(os.Args[1:])
+	configPath, cmd, rest := parseArgs(os.Args[1:])
 	if configPath == "" {
 		configPath = defaultConfigPath()
 	}
@@ -51,6 +53,8 @@ func main() {
 	switch cmd {
 	case "eval":
 		cmdEval(configPath)
+	case "gate":
+		cmdGate(rest)
 	case "validate":
 		cmdValidate(configPath)
 	case "test":
@@ -67,8 +71,9 @@ func main() {
 
 // parseArgs extracts the global -config and -v flags from anywhere
 // in the argument list. The first remaining positional argument is
-// the subcommand. If no positional is given, defaults to "eval".
-func parseArgs(args []string) (configPath, cmd string) {
+// the subcommand and the others are returned as rest. If no positional
+// is given, defaults to "eval".
+func parseArgs(args []string) (configPath, cmd string, rest []string) {
 	var positional []string
 	for i := 0; i < len(args); {
 		switch args[i] {
@@ -87,7 +92,7 @@ func parseArgs(args []string) (configPath, cmd string) {
 		}
 	}
 	if len(positional) > 0 {
-		cmd = positional[0]
+		cmd, rest = positional[0], positional[1:]
 	} else {
 		cmd = "eval"
 	}
@@ -316,6 +321,8 @@ Usage: barmkin [-config <path>] [-v] <command>
 
 Commands:
   eval       Evaluate from stdin (exit 2 = deny, exit 0 = allow)
+  gate       Managed Claude Code shim-presence gate [-socket PATH]
+             (exit 2 = deny, exit 0 = allow)
   validate   Validate config file
   test       Run test vectors (deny + allow)
   stats      Show statistics from log file

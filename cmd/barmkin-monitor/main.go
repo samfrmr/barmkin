@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	barmkin-monitor serve  -socket PATH -journal PATH
+//	barmkin-monitor serve  -socket PATH -journal PATH [-presence-ttl 10s]
 //	barmkin-monitor decide -socket PATH -session ID -operation routine|protected
 //	barmkin-monitor taint  -socket PATH -session ID [-source untrusted-input]
 //	barmkin-monitor send   -socket PATH -path /v1/... -body JSON
@@ -53,8 +53,12 @@ func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	socket := fs.String("socket", "", "Unix socket path to listen on")
 	journalPath := fs.String("journal", "", "taint journal path")
+	ttl := fs.Duration("presence-ttl", monitor.PresenceTTL, "how long a shim registration stays live")
 	fs.Parse(args)
 	requireFlags(fs, *socket, *journalPath)
+	if *ttl <= 0 {
+		return fail("-presence-ttl must be positive")
+	}
 
 	// Take the journal lock before touching the socket, so a second
 	// monitor can never replace a live monitor's socket.
@@ -70,7 +74,9 @@ func cmdServe(args []string) int {
 	}
 	defer os.Remove(*socket)
 
-	srv := monitor.NewHTTPServer(monitor.NewServer(journal, records))
+	server := monitor.NewServer(journal, records)
+	server.SetPresenceTTL(*ttl)
+	srv := monitor.NewHTTPServer(server)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -171,7 +177,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `barmkin-monitor - local barmkin monitor (contract v1)
 
 Usage:
-  barmkin-monitor serve  -socket PATH -journal PATH
+  barmkin-monitor serve  -socket PATH -journal PATH [-presence-ttl 10s]
   barmkin-monitor decide -socket PATH -session ID -operation routine|protected
   barmkin-monitor taint  -socket PATH -session ID [-source untrusted-input]
   barmkin-monitor send   -socket PATH -path /v1/... -body JSON

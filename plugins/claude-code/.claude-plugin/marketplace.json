@@ -1,0 +1,17 @@
+{
+  "name": "barmkin-local",
+  "description": "Local barmkin plugins for the dedicated demo VM",
+  "owner": {
+    "name": "barmkin"
+  },
+  "plugins": [
+    {
+      "name": "barmkin-shim",
+      "description": "Registers every tool call with the local barmkin monitor so the managed barmkin gate allows it",
+      "source": "./barmkin-shim",
+      "author": {
+        "name": "barmkin"
+      }
+    }
+  ]
+}
