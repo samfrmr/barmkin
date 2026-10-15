@@ -30,16 +30,16 @@ type DecisionLogger struct {
 // AuditEntry is the on-wire audit record. Field names match sondera's
 // format, with barmkin-specific additions (rule, content, agent).
 type AuditEntry struct {
-	TS           string  `json:"ts"`                     // RFC3339 UTC timestamp (set by Write)
-	TrajectoryID string  `json:"trajectory_id"`           // session ID
-	Tool         string  `json:"tool"`                    // e.g. "bash", "read", "edit"
-	Action       string  `json:"action"`                  // e.g. "ShellCommand", "FileRead"
-	Decision     string  `json:"decision"`                // "allow" or "deny"
-	Reason       string  `json:"reason,omitempty"`         // rule reason, shown to LLM
-	DurationMs   float64 `json:"duration_ms"`             // evaluation time
-	Rule    string `json:"rule,omitempty"`    // barmkin: matched rule name
-	Content string `json:"content,omitempty"` // barmkin: truncated command content
-	Agent   string `json:"agent,omitempty"`   // barmkin: agent identifier
+	TS           string  `json:"ts"`                // RFC3339 UTC timestamp (set by Write)
+	TrajectoryID string  `json:"trajectory_id"`     // session ID
+	Tool         string  `json:"tool"`              // e.g. "bash", "read", "edit"
+	Action       string  `json:"action"`            // e.g. "ShellCommand", "FileRead"
+	Decision     string  `json:"decision"`          // "allow" or "deny"
+	Reason       string  `json:"reason,omitempty"`  // rule reason, shown to LLM
+	DurationMs   float64 `json:"duration_ms"`       // evaluation time
+	Rule         string  `json:"rule,omitempty"`    // barmkin: matched rule name
+	Content      string  `json:"content,omitempty"` // barmkin: truncated command content
+	Agent        string  `json:"agent,omitempty"`   // barmkin: agent identifier
 }
 
 // newDecisionLogger opens (or creates) the log file for appending.

@@ -328,6 +328,7 @@ Commands:
              (exit 2 = deny, exit 0 = allow)
   monitor    Run the monitor service [-socket PATH] [-state-dir PATH]
              [-client-group NAME] [-preregister-ttl DURATION]
+             [-telemetry-config PATH]
   validate   Validate config file
   test       Run test vectors (deny + allow)
   stats      Show statistics from log file

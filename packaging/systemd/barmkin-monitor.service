@@ -9,7 +9,7 @@
 
 [Unit]
 Description=barmkin monitor
-Documentation=https://github.com/samfrmr/barmkin#packaging-the-managed-monitor-and-claude-code-seat
+Documentation=https://github.com/samfrmr/barmkin#packaging
 
 [Service]
 Type=simple

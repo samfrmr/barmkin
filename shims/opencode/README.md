@@ -1,6 +1,6 @@
 # 🏰 barmkin-opencode 🏰
 
-barmkin's shim for **OpenCode 2.x**: a plugin, `barmkin-opencode`, that guards each OpenCode session as a client of [`barmkin monitor`](../../README.md#monitor-core-barmkin-monitor). It is a port of barmkin-mod's OpenCode plugin (barmkin-mod `opencode/`), in which the monitor holds every session's taint. It redacts secrets, screens untrusted content, and refuses outward-effect tools while the session is tainted.
+barmkin's shim for **OpenCode 2.x**: a plugin, `barmkin-opencode`, that guards each OpenCode session as a client of [`barmkin monitor`](../../README.md#monitor-barmkin-monitor). It is a port of barmkin-mod's OpenCode plugin (barmkin-mod `opencode/`), in which the monitor holds every session's taint. It redacts secrets, screens untrusted content, and refuses outward-effect tools while the session is tainted.
 
 > [!WARNING]
 > **This is a partial port, not equivalent to barmkin-mod for Claude Code. OpenCode 2 has no administrator-locked plugin seat.** Read [What this is not](#what-this-is-not) before relying on it.
@@ -77,7 +77,7 @@ A guard seated any other way (global `plugins/` directory, global `opencode.json
 ## Install
 
 1. Install OpenCode at an exact tested version (see [Tested range](#tested-range)). Do not run on an untested release.
-2. Run `barmkin monitor` (see the [packaging](../../README.md#packaging-the-managed-monitor-and-claude-code-seat)) and make the OpenCode user a member of its client group.
+2. Run `barmkin monitor` (see the [packaging](../../README.md#packaging)) and make the OpenCode user a member of its client group.
 3. Build the plugin (see [Build the bundle](RELEASE-CHECKLIST.md#build-the-bundle)) into a directory named `barmkin-opencode` containing `server.js` (a configured plugin must be a directory; a bare file path in `plugins[]` is rejected). Keep it outside OpenCode's auto-discovered `plugins/` directories so the seat, not discovery, loads it.
 4. Seat it: set `OPENCODE_CONFIG_CONTENT='{"plugins":[{"package":"/absolute/path/to/barmkin-opencode"}]}'` and `BARMKIN_MONITOR_SOCKET=/run/barmkin/monitor.sock` for the service or the launcher. Add `"options":{"sandboxed":true}` only when you have put OpenCode inside an OS sandbox and checked that its tools cannot reach the socket.
 5. Add the allowlist to the user-global `opencode.json` (deny `plugin:*`, allow `plugin:barmkin-opencode`).
