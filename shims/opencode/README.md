@@ -24,7 +24,7 @@ These four are named so nobody assumes them:
 
 ### Documented limitations
 
-- **Human-origin clearing.** OpenCode 2's `session.prompt` hook carries no origin and synthetic user-role messages exist, so the guard cannot tell a person's message from an injected one. The taint is therefore sticky: nothing clears it, not a prompt, a command or a compaction, and there is no clear command. Only a new session starts clean.
+- **Human-origin clearing.** OpenCode 2's `session.prompt` hook carries no origin and synthetic user-role messages exist, so the guard cannot tell a person's message from an injected one. The taint is therefore sticky: nothing clears it, not a prompt, a command or a compaction, and there is no clear command. Only a new session starts clean, unless root opts in to the administrative clear (see the main README), which the plugin meets as `unknown_session` and re-registers.
 - **Command-template shell.** `` !`cmd` `` in a command template runs with no tool hook, no shell hook and no permission check. It cannot be mediated. Disabling project config removes repository command templates.
 - **Shell layer.** OpenCode 2 does not give plugins the session identity of a shell call, so a session taint can restrict shell commands in unrelated sessions on the same instance, and a shell not launched through a tool call bypasses the shell gate entirely. (`shell.create.before` carries no session in its inputs.) The shell layer checks a command against every session with a shell tool call in flight, and denies it only when every one of them would deny it. Otherwise it leaves the command to the permission step, which rechecks it with the call's own session, so a tainted session's command is still refused there.
 
