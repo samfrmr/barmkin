@@ -131,6 +131,10 @@ const (
 
 // script runs a fixed set of requests through c and returns every answer:
 // the response, or the error code.
+// fixedNow pins the clock so journals from separate runs compare equal: raise
+// records carry their time.
+func fixedNow() time.Time { return time.Unix(1_700_000_000, 0) }
+
 func script(t *testing.T, c *core) []string {
 	t.Helper()
 	host := proto.HostClaudeCode
@@ -254,6 +258,7 @@ func TestUnavailableExportChangesNothing(t *testing.T) {
 	ln.Close()
 
 	base, baseJournal := testCore(t)
+	base.now = fixedNow
 	want := script(t, base)
 	for i := range 500 {
 		call(t, base, alice, reg(fmt.Sprintf("n%d", i), fmt.Sprintf("n%d", i), false))
@@ -270,6 +275,7 @@ func TestUnavailableExportChangesNothing(t *testing.T) {
 			cfg.Timeout, cfg.QueueSize, cfg.MaxBatch = time.Second, 2, 1
 			exp := exporterFor(t, cfg)
 			c, j := testCore(t)
+			c.now = fixedNow
 			c.telemetry = exp
 
 			start := time.Now()
