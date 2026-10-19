@@ -11,6 +11,9 @@
 //	barmkin gate        Managed Claude Code PreToolUse check for shim presence
 //	                    (see gate.go), exit 0 (allow) or 2 (deny)
 //	barmkin monitor     Run the monitor service (see monitor_cmd.go)
+//	barmkin monitor-admin
+//	                    Root's list and clear of monitor lineages over the
+//	                    opt-in administrative socket (see monitor_admin_cmd.go)
 //	barmkin test        Run built-in test vectors
 //	barmkin validate    Check config: rule names, patterns, examples
 //	barmkin stats       Aggregate decisions from the log file
@@ -58,6 +61,8 @@ func main() {
 		cmdGate(rest)
 	case "monitor":
 		cmdMonitor(rest)
+	case "monitor-admin":
+		cmdMonitorAdmin(rest)
 	case "validate":
 		cmdValidate(configPath)
 	case "test":
@@ -327,8 +332,11 @@ Commands:
   gate       Managed Claude Code shim-presence gate [-socket PATH] [-monitor-uid UID]
              (exit 2 = deny, exit 0 = allow)
   monitor    Run the monitor service [-socket PATH] [-state-dir PATH]
-             [-client-group NAME] [-preregister-ttl DURATION]
+             [-client-group NAME] [-preregister-ttl DURATION] [-admin-socket PATH]
              [-telemetry-config PATH]
+  monitor-admin list|clear
+             Root only: list monitor lineages, or clear one from a terminal
+             over the opt-in administrative socket
   validate   Validate config file
   test       Run test vectors (deny + allow)
   stats      Show statistics from log file

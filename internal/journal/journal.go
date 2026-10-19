@@ -14,11 +14,21 @@
 //
 //	start      the monitor began serving
 //	shutdown   the monitor stopped cleanly
-//	register   a session joined a root lineage, for a client uid and host
+//	register   a session joined a root lineage, for a client uid and host,
+//	           in the lineage's epoch
 //	raise      a leg of a root lineage rose, naming the source that raised it
+//	clear      root cleared a lineage through the administrative socket: both
+//	           legs fell and the lineage began a new epoch, for a closed
+//	           reason code
+//
+// register, raise and clear records carry the Unix time, in seconds, they
+// were made; a record from an older journal carries none. A clear never
+// removes the raise records before it: the journal is append-only, and
+// compaction keeps every cleared raise and every clear, so a lineage's taint
+// history survives its clears.
 //
 // Pass, warn and deny decisions, pre-registrations, screened content,
-// commands, paths and reasons are never journaled.
+// commands, paths and free-text reasons are never journaled.
 //
 // # Durability
 //
@@ -44,7 +54,8 @@
 // [Create] atomically replaces a journal with a new one holding the given
 // records: it writes a temporary file in the same directory, fsyncs it,
 // renames it over the journal and fsyncs the directory. The monitor uses it
-// at every start to write a snapshot of its replayed state.
+// at every start to write a snapshot of its replayed state, cleared history
+// included.
 //
 // # Permissions
 //
@@ -86,7 +97,31 @@ const (
 	KindShutdown Kind = "shutdown"
 	KindRegister Kind = "register"
 	KindRaise    Kind = "raise"
+	KindClear    Kind = "clear"
 )
+
+// Reason is why root cleared a lineage. It is a closed code, never free
+// text.
+type Reason string
+
+const (
+	// ReasonFalsePositive: the source that raised a leg was not untrusted
+	// or sensitive after all.
+	ReasonFalsePositive Reason = "false_positive"
+	// ReasonReviewedSafe: an operator reviewed what raised the legs and
+	// accepted the session continuing.
+	ReasonReviewedSafe Reason = "reviewed_safe"
+	// ReasonMonitorRecovery: the legs were raised by the monitor's own
+	// state loss (unknown_session or monitor_restart), and an operator
+	// checked the session.
+	ReasonMonitorRecovery Reason = "monitor_recovery"
+)
+
+// Reasons lists every clear reason.
+var Reasons = []Reason{ReasonFalsePositive, ReasonReviewedSafe, ReasonMonitorRecovery}
+
+// ValidReason reports whether r is one of Reasons.
+func ValidReason(r Reason) bool { return slices.Contains(Reasons, r) }
 
 // Leg names one of a lineage's two legs.
 type Leg string
@@ -101,12 +136,15 @@ type Record struct {
 	V       int          `json:"v"`
 	Seq     uint64       `json:"seq"`
 	Kind    Kind         `json:"kind"`
-	UID     uint32       `json:"uid"`     // register, raise: the client's uid
-	Host    proto.Host   `json:"host"`    // register, raise
-	Session string       `json:"session"` // register
-	Root    string       `json:"root"`    // register, raise: the lineage's root session
-	Leg     Leg          `json:"leg"`     // raise
-	Source  proto.Source `json:"source"`  // raise: the source that raised Leg
+	UID     uint32       `json:"uid"`              // register, raise, clear: the client's uid
+	Host    proto.Host   `json:"host"`             // register, raise, clear
+	Session string       `json:"session"`          // register
+	Root    string       `json:"root"`             // register, raise, clear: the lineage's root session
+	Leg     Leg          `json:"leg"`              // raise
+	Source  proto.Source `json:"source"`           // raise: the source that raised Leg
+	Epoch   uint64       `json:"epoch,omitempty"`  // register: the lineage epoch joined; clear: the epoch begun
+	Reason  Reason       `json:"reason,omitempty"` // clear
+	At      int64        `json:"at,omitempty"`     // register, raise, clear: Unix seconds
 }
 
 // Result is what Load found in a journal.
@@ -159,10 +197,14 @@ func (r Record) Valid() bool {
 		return r == Record{V: r.V, Seq: r.Seq, Kind: r.Kind}
 	case KindRegister:
 		return validHost(r.Host) && proto.ValidToken(r.Session) &&
-			proto.ValidToken(r.Root) && r.Leg == "" && r.Source == ""
+			proto.ValidToken(r.Root) && r.Leg == "" && r.Source == "" &&
+			r.Reason == "" && r.At >= 0
 	case KindRaise:
 		return validHost(r.Host) && r.Session == "" && proto.ValidToken(r.Root) &&
-			SourceFits(r.Leg, r.Source)
+			SourceFits(r.Leg, r.Source) && r.Epoch == 0 && r.Reason == "" && r.At >= 0
+	case KindClear:
+		return validHost(r.Host) && r.Session == "" && proto.ValidToken(r.Root) &&
+			r.Leg == "" && r.Source == "" && r.Epoch > 0 && ValidReason(r.Reason) && r.At > 0
 	}
 	return false
 }

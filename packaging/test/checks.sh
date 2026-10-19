@@ -4,6 +4,8 @@
 # test in packaging/nixos run it.
 #
 #   checks.sh installed <client-user> <outsider-user>
+#   checks.sh admin <client-user> <outsider-user>
+#   checks.sh no-admin
 #   checks.sh fingerprint
 #   checks.sh absent [--keep-state]
 #
@@ -19,6 +21,13 @@
 #   - a socket served by another uid is denied by the pinned gate;
 #   - after a SIGKILL, systemd restarts the monitor, the session comes back
 #     tainted by monitor_restart, and pre-registered calls are allowed again.
+# admin checks the opt-in administrative socket: it is root's, in a
+# directory only root can enter, and neither user reaches it; the client
+# socket answers none of its paths; root's `barmkin monitor-admin clear`
+# refuses without a terminal or when the lineage id is not typed back; and a
+# confirmed clear lowers a tainted lineage, makes its session register again,
+# keeps the cleared raise in the journal and survives a restart.
+# no-admin checks that there is no administrative socket: the default.
 # fingerprint prints the installed state, for comparing two installs.
 # absent checks that nothing is left after an uninstall; --keep-state allows
 # the state directory (NixOS keeps a StateDirectory).
@@ -31,6 +40,9 @@ readonly runtime_dir=/run/barmkin
 readonly socket=$runtime_dir/monitor.sock
 readonly state_dir=/var/lib/barmkin
 readonly journal=$state_dir/journal
+readonly admin_unit=barmkin-monitor-admin.socket
+readonly admin_dir=/run/barmkin-admin
+readonly admin_socket=$admin_dir/admin.sock
 
 ok() { echo "ok   - $*"; }
 fail() { echo "FAIL - $*" >&2; exit 1; }
@@ -57,9 +69,12 @@ json_string() { grep -o "\"$1\": *\"[^\"]*\"" "$2" | head -1 | sed 's/.*: *"\(.*
 
 # post <user> <op> <body> [socket]: one contract request as user; prints the
 # body and the HTTP status.
-post() {
-	runuser -u "$1" -- curl -sS --max-time 3 --unix-socket "${4:-$socket}" \
-		-H 'content-type: application/json' -w ' %{http_code}' --data "$3" "http://barmkin/v1/$2"
+post() { post_path "$1" "/v1/$2" "$3" "${4:-$socket}"; }
+
+# post_path <user> <path> <body> <socket>: a request to any path.
+post_path() {
+	runuser -u "$1" -- curl -sS --max-time 3 --unix-socket "$4" \
+		-H 'content-type: application/json' -w ' %{http_code}' --data "$3" "http://barmkin$2"
 }
 
 # expect_post <want-substring> <label> <post args...>
@@ -256,6 +271,80 @@ cmd_installed() {
 	echo "PASS: installed"
 }
 
+cmd_admin() {
+	local client=$1 outsider=$2 s bin u out rc uid pid clear
+	s=adm-$$-$(date +%s)
+	uid=$(id -u "$client")
+	read -r -a gate <<<"$(json_string command "$settings")"
+	bin=${gate[0]}
+
+	echo "== administrative socket"
+	systemctl is-active --quiet "$admin_unit" || fail "$admin_unit is not active"
+	pid=$(main_pid)
+	[[ $(tr '\0' ' ' <"/proc/$pid/cmdline") == *"-admin-socket $admin_socket"* ]] || fail "the monitor was not started with -admin-socket"
+	ok "$admin_unit active, and the monitor (pid $pid) serves it"
+	modes "$admin_dir" "root:root 700 directory"
+	modes "$admin_socket" "root:root 600 socket"
+	for u in "$client" "$outsider"; do
+		out=$(post_path "$u" /admin/v1/list '{"version":1}' "$admin_socket" 2>&1) && fail "$u reached the administrative socket: $out"
+		ok "$u cannot reach the administrative socket: ${out//$'\n'/ }"
+	done
+	expect_post '"untrusted":"none"' "fresh session registers clean" "$client" register "$(register "$s" true false)"
+	expect_post '"untrusted":"fetch"' "a fetch taints it" "$client" observe "{\"version\":1,\"host\":\"claude_code\",\"session\":\"$s\",\"source\":\"fetch\"}"
+	clear='{"version":1,"uid":'$uid',"host":"claude_code","lineage":"'$s'","epoch":0,"legs":{"untrusted":"fetch","sensitive":"none"},"reason":"reviewed_safe"}'
+	for p in /admin/v1/clear /v1/clear; do
+		out=$(post_path "$client" "$p" "$clear" "$socket" 2>&1) || true
+		[[ $out == *'"error":"bad_request"'*' 400' ]] || fail "the client socket answered $p: $out"
+		ok "the client socket refuses $p: $out"
+	done
+
+	echo "== monitor-admin"
+	out=$("$bin" monitor-admin list 2>&1) || fail "monitor-admin list: $out"
+	grep -Eq "^$s +$uid +claude_code +0 +fetch \(" <<<"$out" || fail "monitor-admin list does not show $s tainted by fetch: $out"
+	ok "root lists the lineage: $(grep "^$s" <<<"$out")"
+	out=$(runuser -u "$client" -- "$bin" monitor-admin list 2>&1) && fail "a client ran monitor-admin list: $out"
+	ok "a client cannot list: $out"
+	local args=(monitor-admin clear -uid "$uid" -host claude_code -lineage "$s" -reason reviewed_safe)
+	rc=0
+	out=$("$bin" "${args[@]}" </dev/null 2>&1) || rc=$?
+	[[ $rc == 1 && $out == *"needs a terminal"* ]] || fail "clear without a terminal: exit $rc: $out"
+	ok "clear without a terminal is refused: $out"
+	rc=0
+	out=$(printf 'yes\n' | script -qec "$bin ${args[*]}" /dev/null 2>&1) || rc=$?
+	[[ $rc == 1 && $out == *"nothing was cleared"* ]] || fail "clear without the lineage typed back: exit $rc: $out"
+	ok "clear without the lineage id typed back is refused"
+	expect_post '"untrusted":"fetch"' "the refused clears changed nothing" "$client" status "$(status_body "$s")"
+	rc=0
+	out=$(printf '%s\n' "$s" | script -qec "$bin ${args[*]}" /dev/null 2>&1) || rc=$?
+	[[ $rc == 0 && $out == *"Cleared."* && $out == *"does not remove untrusted material already in an AI"* ]] ||
+		fail "a confirmed clear: exit $rc: $out"
+	ok "a confirmed clear from a terminal, with the conversation warning"
+	journalctl -u "$unit" --no-pager -q | grep -q "root cleared lineage $s of uid $uid" || fail "the clear is not in the monitor's log"
+	ok "the clear is in the monitor's log"
+	expect_post '"error":"unknown_session"' "the session must register again" "$client" status "$(status_body "$s")"
+	expect_post '"untrusted":"none"' "it registers again, clean" "$client" register "$(register "$s" true false)"
+	grep -q "\"kind\":\"raise\".*\"root\":\"$s\".*\"source\":\"fetch\"" "$journal" || fail "the cleared raise is gone from the journal"
+	grep -q "\"kind\":\"clear\".*\"root\":\"$s\".*\"epoch\":1,\"reason\":\"reviewed_safe\"" "$journal" || fail "no clear record in the journal"
+	ok "the journal keeps the cleared raise and the clear"
+	systemctl restart "$unit"
+	wait_for_health "$client"
+	expect_post '"untrusted":"none"' "the clear survives a restart" "$client" status "$(status_body "$s")"
+	echo "PASS: admin"
+}
+
+status_body() { printf '{"version":1,"host":"claude_code","session":"%s"}' "$1"; }
+
+cmd_no_admin() {
+	local pid
+	pid=$(main_pid)
+	[[ $(tr '\0' ' ' <"/proc/$pid/cmdline") != *"-admin-socket"* ]] || fail "the monitor was started with -admin-socket"
+	! systemctl is-active --quiet "$admin_unit" || fail "$admin_unit is active"
+	# systemd removes the socket on stop; NixOS may leave its empty root-only
+	# directory until reboot.
+	[[ ! -e $admin_socket ]] || fail "$admin_socket exists"
+	ok "no administrative socket: the taint is sticky"
+}
+
 cmd_fingerprint() {
 	local gate f
 	read -r -a gate <<<"$(json_string command "$settings")"
@@ -267,6 +356,8 @@ cmd_fingerprint() {
 	getent passwd barmkin
 	getent group barmkin-clients
 	systemctl is-enabled "$unit"
+	systemctl is-active "$admin_unit" || true
+	[[ ! -e $admin_socket ]] || stat -c '%n %U:%G %a %F' "$admin_dir" "$admin_socket"
 	echo "monitor pid $(main_pid)"
 }
 
@@ -282,6 +373,9 @@ cmd_absent() {
 		[[ ! -e $f && ! -L $f ]] || fail "$f is still there"
 	done
 	ok "managed settings, runtime directory, binary and marketplace are gone"
+	[[ $(systemctl show -p LoadState --value "$admin_unit") == not-found && ! -e $admin_socket ]] ||
+		fail "the administrative socket is still there"
+	ok "the administrative socket is gone"
 	if [[ $keep_state != --keep-state ]]; then
 		[[ ! -e $state_dir ]] || fail "$state_dir is still there"
 		ok "$state_dir is gone"
@@ -291,7 +385,9 @@ cmd_absent() {
 
 case ${1:-} in
 installed) [[ $# == 3 ]] || { echo "usage: $0 installed <client> <outsider>" >&2; exit 2; }; cmd_installed "$2" "$3" ;;
+admin) [[ $# == 3 ]] || { echo "usage: $0 admin <client> <outsider>" >&2; exit 2; }; cmd_admin "$2" "$3" ;;
+no-admin) cmd_no_admin ;;
 fingerprint) cmd_fingerprint ;;
 absent) cmd_absent "${2:-}" ;;
-*) echo "usage: $0 installed <client> <outsider> | fingerprint | absent [--keep-state]" >&2; exit 2 ;;
+*) echo "usage: $0 installed <client> <outsider> | admin <client> <outsider> | no-admin | fingerprint | absent [--keep-state]" >&2; exit 2 ;;
 esac

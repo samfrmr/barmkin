@@ -3,7 +3,7 @@
 # Claude Code seat on a systemd host such as Ubuntu or Debian. NixOS uses the
 # module in packaging/nixos instead.
 #
-#   packaging/install.sh install [--binary PATH] [--client USER]...
+#   packaging/install.sh install [--binary PATH] [--client USER]... [--admin-socket]
 #   packaging/install.sh uninstall
 #   packaging/install.sh render-settings --monitor-uid UID
 #
@@ -18,13 +18,19 @@
 #     starts it, restarting it only when the binary or the unit changed;
 #   - writes /etc/claude-code/managed-settings.json from
 #     plugins/claude-code/managed-settings.example.json, with the gate pinned
-#     to the barmkin user's uid (-monitor-uid).
+#     to the barmkin user's uid (-monitor-uid);
+#   - only with --admin-socket: installs packaging/systemd/barmkin-monitor-admin.socket
+#     and the drop-in barmkin-monitor.service.d/admin.conf, which give the
+#     monitor its root-only administrative socket for `barmkin monitor-admin`.
+#     Without it, install removes them if an earlier install put them there,
+#     so the taint is sticky again.
 # Running it again changes nothing that is already in place. It refuses to
 # replace managed settings it did not write.
 #
-# uninstall, as root, stops and removes the service, its state and runtime
-# directories, the files above, the user and the group. It leaves managed
-# settings it did not write in place. Running it again is a no-op.
+# uninstall, as root, stops and removes the service, the administrative
+# socket, its state and runtime directories, the files above, the user and
+# the group. It leaves managed settings it did not write in place. Running it
+# again is a no-op.
 #
 # render-settings prints the managed settings install would write for a
 # monitor running as UID.
@@ -37,6 +43,11 @@ readonly client_group=barmkin-clients
 readonly unit_name=barmkin-monitor.service
 readonly bin=/usr/local/bin/barmkin
 readonly unit=/etc/systemd/system/$unit_name
+readonly admin_unit_name=barmkin-monitor-admin.socket
+readonly admin_unit=/etc/systemd/system/$admin_unit_name
+readonly admin_dropin_dir=/etc/systemd/system/$unit_name.d
+readonly admin_dropin=$admin_dropin_dir/admin.conf
+readonly admin_dir=/run/barmkin-admin
 readonly prefix=/opt/barmkin
 readonly marketplace=$prefix/plugins/claude-code
 readonly settings_record=$prefix/managed-settings.sha256
@@ -135,6 +146,31 @@ install_settings() {
 	rm -f "$tmp"
 }
 
+# remove_admin: takes the administrative socket away from the monitor, then
+# stops and removes it. The drop-in goes first, so stopping the socket does
+# not stop the monitor that required it. Succeeds only when something was
+# removed; the caller restarts the monitor.
+remove_admin() {
+	local removed=1
+	if [[ -e $admin_dropin ]]; then
+		rm -f "$admin_dropin"
+		rmdir "$admin_dropin_dir" 2>/dev/null || true
+		systemctl daemon-reload
+		removed=0
+	fi
+	if [[ -e $admin_unit ]] || systemctl cat "$admin_unit_name" >/dev/null 2>&1; then
+		systemctl stop "$admin_unit_name" 2>/dev/null || true
+	fi
+	if [[ -e $admin_unit ]]; then
+		rm -f "$admin_unit"
+		systemctl daemon-reload
+		removed=0
+	fi
+	systemctl reset-failed "$admin_unit_name" 2>/dev/null || true
+	[[ -e $admin_dir ]] && rm -rf "$admin_dir"
+	return $removed
+}
+
 # wait_for_monitor: the monitor is up once it answers health with ok on its
 # socket. A socket file alone can be left over from a run that failed.
 wait_for_monitor() {
@@ -151,11 +187,12 @@ wait_for_monitor() {
 }
 
 cmd_install() {
-	local binary=$repo/barmkin clients=() c gid restart=0
+	local binary=$repo/barmkin clients=() c gid restart=0 reload=0 admin=0 admin_changed=0
 	while (($#)); do
 		case $1 in
 		--binary) binary=${2:?--binary needs a path}; shift 2 ;;
 		--client) clients+=("${2:?--client needs a user}"); shift 2 ;;
+		--admin-socket) admin=1; shift ;;
 		*) usage ;;
 		esac
 	done
@@ -188,6 +225,21 @@ cmd_install() {
 	if install_marketplace; then say "shim marketplace → $marketplace"; fi
 	if put "$repo/packaging/systemd/$unit_name" "$unit" 0644; then
 		say "unit → $unit"
+		reload=1
+	fi
+	if ((admin)); then
+		install -d -o root -g root -m 0755 "$admin_dropin_dir"
+		if put "$repo/packaging/systemd/$admin_unit_name" "$admin_unit" 0644; then admin_changed=1; fi
+		if put "$repo/packaging/systemd/barmkin-monitor-admin.conf" "$admin_dropin" 0644; then admin_changed=1; fi
+		if ((admin_changed)); then
+			say "administrative socket → $admin_dir/admin.sock (root only: barmkin monitor-admin)"
+			reload=1
+		fi
+	elif remove_admin; then
+		say "administrative socket removed"
+		restart=1
+	fi
+	if ((reload)); then
 		systemctl daemon-reload
 		restart=1
 	fi
@@ -218,6 +270,7 @@ cmd_uninstall() {
 		say "service removed"
 	fi
 	systemctl reset-failed "$unit_name" 2>/dev/null || true
+	if remove_admin; then say "administrative socket removed"; fi
 
 	if [[ -f $settings && ! -L $settings ]]; then
 		have=$(sha <"$settings")

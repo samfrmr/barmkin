@@ -12,11 +12,44 @@
 // that registers under a root shares that root's legs.
 //
 // Legs only rise. observe raises the leg its source belongs to, and the
-// first source to raise a leg stays. Nothing lowers a leg: there is no
-// clear, rotate, capability or acknowledgement operation, and registering
-// again returns the legs unchanged and cannot move a session to another
-// lineage. A session keeps its legs for the life of the monitor's state; a
-// new session is a new registration.
+// first source to raise a leg stays. Nothing a client sends lowers a leg:
+// the client contract has no clear, rotate, capability or acknowledgement
+// operation, and registering again returns the legs unchanged and cannot
+// move a session to another lineage. A session keeps its legs for the life
+// of the monitor's state; a new session is a new registration. The only way
+// down is root's opt-in administrative clear, below.
+//
+// # Administrative clear
+//
+// By default the monitor has no administrative socket and the taint is
+// sticky. With [Config.AdminSocket], it also serves internal/admin on a
+// socket that systemd creates, as root, in a directory only root can enter
+// (barmkin-monitor-admin.socket), and passes to it by socket activation. The
+// monitor never creates that socket: [Start] takes it from systemd, refuses
+// to start without it, and requires its directory to be root's with no
+// group or other access. The socket's server closes every connection whose
+// peer is not root before reading it, and answers a request from any other
+// uid forbidden. The client socket answers none of its paths, so no shim,
+// plugin, MCP server, managed gate or ordinary user can reach it.
+//
+// list shows every lineage: its uid, host, root token, epoch, legs, the
+// closed sources that raised them and when, its sessions, and its earlier
+// clears. clear lowers both legs of one lineage named exactly, with the
+// epoch and legs root was shown and a closed reason. The monitor appends a
+// clear record starting the lineage's next epoch and answers only after the
+// journal's fsync returns; until then the legs stay up, and a clear the
+// journal cannot take degrades the monitor and lowers nothing. The cleared
+// raises stay in the journal and in the lineage's history, and compaction
+// keeps them. Every pre-registration of the lineage's sessions is dropped,
+// and each session is unknown_session until it registers again in the new
+// epoch, which the shims do on that error. A clear survives a clean restart;
+// after an unclean one, monitor_restart raises the untrusted leg again, as
+// for every lineage.
+//
+// Clearing monitor state does not remove untrusted material already in an
+// AI conversation: anything the session read, a prompt injection included,
+// is still in its context. barmkin monitor-admin, the client, says so and
+// asks root to type the lineage back from a terminal before it clears.
 //
 // # Unknown and unrecoverable sessions deny
 //
