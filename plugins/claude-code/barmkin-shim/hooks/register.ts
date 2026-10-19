@@ -5,9 +5,9 @@
 // The monitor (internal/monitor, reached over HTTP on its Unix socket through
 // the contract in lib/proto.ts) owns the session: its two legs (untrusted and
 // sensitive), the egress decision over them, and the screen of untrusted
-// content. Legs only rise. Nothing in the shim or the monitor lowers one: no
-// prompt, command, compaction or /clear clears the taint, and only a new
-// session starts clean.
+// content. Legs only rise. Nothing in the shim lowers one: no prompt,
+// command, compaction or /clear clears the taint. Only root's opt-in
+// administrative clear does (README, "Administrative clear").
 //
 // The shim keeps what needs the content, which never leaves it except as
 // redacted screen windows: secret redaction and invisible-text scrub,
