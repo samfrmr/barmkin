@@ -43,6 +43,13 @@
 //    everything optional (rpc, the plugin-inventory probe) is isolated, and
 //    setup never waits on the monitor.
 //
+// The root policy (/etc/barmkin/policy.yaml, the library's policy.ts) can only
+// add to the built-in redaction rules, injection phrases, secret paths and
+// outward-effect commands. It is read at setup, from that path only, by
+// src/policy-file.ts. An invalid policy is never partly applied: every monitor
+// request fails, so every guarded call is denied, and local redaction keeps the
+// built-in rules. It takes effect when OpenCode next loads the plugin.
+//
 // Environment variables:
 //   BARMKIN_MONITOR_SOCKET   monitor Unix socket path (required)
 //
@@ -56,7 +63,9 @@
 //                          string; empty allows every server (audit-only).
 //   debug                  log the guard's own failures to stderr.
 import {
-  REDACTION_RULES,
+  BUILTIN_POLICY,
+  describePolicy,
+  policyFromRead,
   redactInEitherView as redactInEitherViewLib,
   classifierInput,
   WITHHELD_TEXT,
@@ -75,16 +84,20 @@ import {
   planWindows,
   skillBodyWithheldText,
   neutralizeSkillListing,
+  type ActivePolicy,
   type EgressCall,
+  type EgressClass,
   type EgressVerdict,
+  type PolicyLoad,
   type ShownLegs,
 } from './src/lib'
-import { classifyCalls, normaliseEgressCalls, normaliseEvaluate, type NormaliseOptions } from './src/egress-normaliser'
+import { classifyCalls, normaliseEgressCalls, normaliseEvaluate, opencodeEgressClasses, OPENCODE_EGRESS_CLASSES, type NormaliseOptions } from './src/egress-normaliser'
+import { readPolicyFile } from './src/policy-file'
 import { installMcpGuard, isServerAllowed, parseAllowlist, type McpFinding, type McpGuardHandle, type McpGuardHost, type SessionContextLike } from './src/mcp-guard'
 import { mapPromptStrings, mapRequestStrings, mapToolDescriptions, mapCompactionResult, promptText, type SessionCompactionShape, type SessionContextShape, type SessionPromptShape, type ToolAfterEvent as WireAfterEvent } from './src/result-shapes'
 import { statusRpc, type StatusReport } from './src/status-rpc'
 import { afterEventText, noticeAfterEvent, redactAfterEvent, withholdAfterEvent } from './src/tool-result'
-import { answerLegs, describeFailure, postMonitor, SOCKET_ENV, TOKEN, type Answer, type Failure } from './src/monitor'
+import { answerLegs, describeFailure, postMonitor as postMonitorRaw, SOCKET_ENV, TOKEN, type Answer, type Failure } from './src/monitor'
 import { VERSION, type Class, type Legs, type Op, type Posture, type Requests, type Scores, type Source } from '../common/proto.ts'
 
 // ---------------------------------------------------------------------------
@@ -210,7 +223,33 @@ function debugLog(message: string): void {
 }
 
 function redactInEitherView(text: string, counters: Record<string, number> = redactionCounters): { text: string; redactedCount: number } {
-  return redactInEitherViewLib(text, REDACTION_RULES, counters)
+  return redactInEitherViewLib(text, enforced.redactionRules, counters)
+}
+
+// ---------------------------------------------------------------------------
+// The root policy, read at setup. Until then, and while it is invalid, the
+// built-in lists apply; an invalid one also fails every monitor request.
+// ---------------------------------------------------------------------------
+
+let policyLoad: PolicyLoad = { state: 'absent', policy: BUILTIN_POLICY }
+let enforced: ActivePolicy = BUILTIN_POLICY
+let egressClasses: readonly EgressClass[] = OPENCODE_EGRESS_CLASSES
+
+function loadPolicy(): void {
+  try {
+    policyLoad = policyFromRead(readPolicyFile())
+  } catch {
+    policyLoad = policyFromRead({ kind: 'refused', reason: 'it could not be read' })
+  }
+  enforced = policyLoad.state === 'invalid' ? BUILTIN_POLICY : policyLoad.policy
+  egressClasses = opencodeEgressClasses(enforced.egressClasses)
+}
+
+// Every monitor request about a session goes through here: none is sent under
+// a policy the shim cannot enforce, so each step it guards is denied.
+function postMonitor<O extends Op>(socket: string, op: O, request: Requests[O]): Promise<Answer<O>> {
+  if (policyLoad.state === 'invalid') return Promise.resolve({ ok: false, failure: 'policy_invalid' })
+  return postMonitorRaw(socket, op, request)
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -527,7 +566,7 @@ function deny(classIds: string[], message: string): EgressVerdict {
 // Marks leg B when a call names a secret-bearing path. Returns the failure if
 // the monitor could not record it, so the caller denies the call.
 async function noteSensitiveAccess(ctx: PluginContext, session: string, calls: readonly EgressCall[]): Promise<Failure | null> {
-  const call = calls.find(touchesSecretPath)
+  const call = calls.find((c) => touchesSecretPath(c, enforced.secretPathPatterns))
   if (!call) return null
   const answer = await observe(ctx, session, 'credential', 'a ' + call.tool + ' call named a credential path')
   return answer.ok ? null : answer.failure
@@ -541,7 +580,7 @@ async function noteSensitiveAccess(ctx: PluginContext, session: string, calls: r
 async function egressGate(ctx: PluginContext, session: string, calls: readonly EgressCall[]): Promise<EgressVerdict> {
   const unrecorded = await noteSensitiveAccess(ctx, session, calls)
   if (unrecorded) return deny([], failureText('this call', unrecorded))
-  const classes = classifyCalls(calls)
+  const classes = classifyCalls(calls, egressClasses)
   const answer = await sessionRequest(ctx, session, 'decide', { classes: classes.map((c) => c.id as Class) })
   if (!answer.ok) return deny(classes.map((c) => c.id), failureText('this call', answer.failure))
   const root = await rootOf(ctx, session)
@@ -677,11 +716,11 @@ async function screenContent(ctx: PluginContext, session: string, raw: string, s
   if (exceedsScreenedLimit(raw)) return { decision: 'deny', withholdReason: SCREENED_LIMIT_REASON }
   const scrubbed = scrubInvisible(raw).text
   const scores: Scores = {
-    injection: heuristicInjectionScore(scrubbed),
-    credentials: containsSecretInEitherView(raw, REDACTION_RULES) ? 0.9 : 0,
+    injection: heuristicInjectionScore(scrubbed, enforced.injectionPatterns),
+    credentials: containsSecretInEitherView(raw, enforced.redactionRules) ? 0.9 : 0,
     exfiltration: 0,
   }
-  const input = classifierInput(raw, REDACTION_RULES, redactionCounters)
+  const input = classifierInput(raw, enforced.redactionRules, redactionCounters)
   if (input === null) return { decision: 'deny', withholdReason: 'its redacted text could not be cut into screen windows' }
   if (input.length === 0) return { decision: 'pass' }
   const plan = planWindows(input)
@@ -826,7 +865,7 @@ async function shellCreateBefore(ctx: PluginContext, e: ShellCreateBefore): Prom
   const sessions = [...new Set(shellInFlight.values())]
   if (sessions.length === 0) return
   try {
-    const classes = classifyCalls(normaliseEgressCalls('shell', { command: e.command }))
+    const classes = classifyCalls(normaliseEgressCalls('shell', { command: e.command }), egressClasses)
     const ids = classes.map((c) => c.id as Class)
     const roots = new Map<string, string>()
     for (const session of sessions) roots.set(await rootOf(ctx, session), session)
@@ -1133,7 +1172,7 @@ async function probeMonitor(): Promise<MonitorPosture> {
   const socketConfigured = socketPath() !== ''
   const sandboxed = reportedPosture().sandbox_enabled
   if (!socketConfigured) return { sandboxed, socketConfigured, health: 'not_configured' }
-  const answer = await postMonitor(socketPath(), 'health', { version: VERSION })
+  const answer = await postMonitorRaw(socketPath(), 'health', { version: VERSION })
   return { sandboxed, socketConfigured, health: answer.ok ? answer.value.state : answer.failure }
 }
 
@@ -1153,7 +1192,7 @@ function notCovered(s: Seat): string[] {
 // is verbatim, the conditional lines are the re-scout section 2.2 wording, one per
 // condition, plus one per reason the monitor will deny every guarded call. The
 // seat is named inside `not covered:`.
-export function buildPostureLines(s: Seat, m: MonitorPosture = monitorPosture, coreSha: string = CORE_SHA): string[] {
+export function buildPostureLines(s: Seat, m: MonitorPosture = monitorPosture, coreSha: string = CORE_SHA, p: PolicyLoad = policyLoad): string[] {
   const seatText = s.name === 'inline-config' ? 'seat "inline-config" is user-owned, not administrator-enforced' : s.name === 'file-or-package' ? 'seat "file-or-package" is user-owned, not administrator-enforced' : 'seat unverified'
   const lines = [
     '\u{1F3F0} barmkin-opencode ' +
@@ -1182,6 +1221,7 @@ export function buildPostureLines(s: Seat, m: MonitorPosture = monitorPosture, c
   } else if (m.health !== 'ok' && m.health !== 'unchecked') {
     lines.push('\u{1F3F0} barmkin-opencode: ' + (m.health === 'degraded' ? 'the barmkin monitor reports itself degraded' : describeFailure(m.health)) + ', so every guarded tool call is denied.')
   }
+  if (p.state === 'invalid') lines.push('\u{1F3F0} barmkin-opencode: ' + describePolicy(p) + '.')
   if (!m.sandboxed) {
     lines.push(
       '\u{1F3F0} barmkin-opencode: OpenCode runs its tools outside a sandbox, so the barmkin monitor refuses its sessions and every guarded tool call is denied. Set the sandboxed option only when OpenCode runs inside an OS sandbox whose tools cannot reach the monitor socket.',
@@ -1256,6 +1296,7 @@ export default {
   setup: async (ctx: PluginContext) => {
     pluginOptions = ctx.options ?? {}
     projectDirectory = ctx.location?.directory ?? ''
+    loadPolicy()
     monitorPosture = { sandboxed: reportedPosture().sandbox_enabled, socketConfigured: socketPath() !== '', health: 'unchecked' }
     postureLines = buildPostureLines(seat)
 

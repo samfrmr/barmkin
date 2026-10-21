@@ -33,10 +33,25 @@
 // function nested inside a hook), per `claude plugin validate`'s static-analysis
 // rules for the mods API.
 //
+// The root policy (/etc/barmkin/policy.yaml, lib/policy.ts) can only add to the
+// built-in redaction rules, injection phrases, secret paths and outward-effect
+// commands. It is read once per module load, from that path only. An invalid
+// policy is never partly applied: every monitor request fails, so every step
+// the monitor guards is denied, and local redaction keeps the built-in rules.
+//
 // Environment variables:
 //   BARMKIN_MONITOR_SOCKET   monitor Unix socket path (required)
 import { atom, read, update } from 'claude-code'
-import { REDACTION_RULES } from './lib/redaction-rules'
+import {
+  BUILTIN_POLICY,
+  MAX_POLICY_BYTES,
+  POLICY_PATH,
+  describePolicy,
+  policyFromRead,
+  type ActivePolicy,
+  type PolicyLoad,
+  type PolicyRead,
+} from './lib/policy'
 import {
   redactInEitherView as redactInEitherViewLib,
   classifierInput,
@@ -153,8 +168,56 @@ function parseAllowlist(raw: unknown): string[] {
   return []
 }
 
-function redactInEitherView(text: string): { text: string; redactedCount: number } {
-  return redactInEitherViewLib(text, REDACTION_RULES, redactionCounters)
+function redactInEitherView(text: string, policy: ActivePolicy): { text: string; redactedCount: number } {
+  return redactInEitherViewLib(text, policy.redactionRules, redactionCounters)
+}
+
+// ---------------------------------------------------------------------------
+// The root policy. Read once per module load from POLICY_PATH alone. $.fs
+// reports no owner or mode, so the shim checks what it can see: the path is
+// not a symbolic link, resolves to itself (no linked directory above it), and
+// is a regular file within the size bound. Root's ownership of /etc, and
+// AppArmor keeping a sandbox's root out of it, are the deployment's.
+// ---------------------------------------------------------------------------
+
+let policyLoad: Promise<PolicyLoad> | null = null
+
+function currentPolicy($: any): Promise<PolicyLoad> {
+  if (!policyLoad) policyLoad = readPolicyFile($).then(policyFromRead, () => policyFromRead({ kind: 'refused', reason: 'it could not be read' }))
+  return policyLoad
+}
+
+// The lists every local check uses. An invalid policy adds nothing here;
+// postMonitor fails every request under it, so the guarded steps deny.
+async function enforcedPolicy($: any): Promise<ActivePolicy> {
+  const load = await currentPolicy($)
+  return load.state === 'invalid' ? BUILTIN_POLICY : load.policy
+}
+
+async function readPolicyFile($: any): Promise<PolicyRead> {
+  let stat: any
+  try {
+    stat = await $.fs.stat(POLICY_PATH, { resolve: true })
+  } catch {
+    let exists = true
+    try {
+      exists = await $.fs.exists(POLICY_PATH)
+    } catch {
+      // treated as present and unreadable below
+    }
+    return exists ? { kind: 'refused', reason: 'it could not be read' } : { kind: 'absent' }
+  }
+  if (stat?.isLink) return { kind: 'refused', reason: 'it is a symbolic link' }
+  if (stat?.realPath !== POLICY_PATH) return { kind: 'refused', reason: 'its path does not resolve to ' + POLICY_PATH }
+  if (stat.kind !== 'file') return { kind: 'refused', reason: 'it is not a regular file' }
+  if (typeof stat.size !== 'number' || stat.size > MAX_POLICY_BYTES) return { kind: 'refused', reason: 'it is larger than ' + MAX_POLICY_BYTES + ' bytes' }
+  let text: unknown
+  try {
+    text = await $.fs.read(POLICY_PATH)
+  } catch {
+    return { kind: 'refused', reason: 'it could not be read' }
+  }
+  return typeof text === 'string' ? { kind: 'file', text } : { kind: 'refused', reason: 'it could not be read as text' }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +226,7 @@ function redactInEitherView(text: string): { text: string; redactedCount: number
 // ---------------------------------------------------------------------------
 
 async function postMonitor<O extends Op>($: any, op: O, request: Requests[O]): Promise<Answer<O>> {
+  if ((await currentPolicy($)).state === 'invalid') return { ok: false, failure: 'policy_invalid' }
   const socketPath = await $.env.get('BARMKIN_MONITOR_SOCKET')
   if (typeof socketPath !== 'string' || socketPath === '') return { ok: false, failure: 'not_configured' }
   const body = encodeBody(op, request)
@@ -307,7 +371,7 @@ function failureText(what: string, failure: Failure): string {
 // Marks leg B when a call names a secret-bearing path. Returns the failure if
 // the monitor could not record it, so the caller denies the call.
 async function noteSensitiveAccess($: any, call: EgressCall): Promise<Failure | null> {
-  if (!touchesSecretPath(call)) return null
+  if (!touchesSecretPath(call, (await enforcedPolicy($)).secretPathPatterns)) return null
   const answer = await observe($, 'credential', 'a ' + call.tool + ' call named a credential path')
   return answer.ok ? null : answer.failure
 }
@@ -319,7 +383,7 @@ async function noteSensitiveAccess($: any, call: EgressCall): Promise<Failure | 
 async function egressGate($: any, call: EgressCall): Promise<EgressVerdict> {
   const unrecorded = await noteSensitiveAccess($, call)
   if (unrecorded) return { kind: 'deny', classIds: [], rule: 'untrusted', message: failureText('this call', unrecorded) }
-  const classes = classifyEgress(call)
+  const classes = classifyEgress(call, (await enforcedPolicy($)).egressClasses)
   const answer = await sessionRequest($, 'decide', { classes: classes.map((c) => c.id as Class) })
   if (!answer.ok) return { kind: 'deny', classIds: classes.map((c) => c.id), rule: 'untrusted', message: failureText('this call', answer.failure) }
   const verdict = describeVerdict(answer.value, classes, await shownLegs($, answer.value.legs))
@@ -386,12 +450,13 @@ type ScreenResult =
 async function screenContent($: any, raw: string, source: Source, label: string, toolUseId: string | undefined): Promise<ScreenResult> {
   if (exceedsScreenedLimit(raw)) return { decision: 'deny', withholdReason: SCREENED_LIMIT_REASON }
   const scrubbed = scrubInvisible(raw).text
+  const policy = await enforcedPolicy($)
   const scores: Scores = {
-    injection: heuristicInjectionScore(scrubbed),
-    credentials: containsSecretInEitherView(raw, REDACTION_RULES) ? 0.9 : 0,
+    injection: heuristicInjectionScore(scrubbed, policy.injectionPatterns),
+    credentials: containsSecretInEitherView(raw, policy.redactionRules) ? 0.9 : 0,
     exfiltration: 0,
   }
-  const input = classifierInput(raw, REDACTION_RULES, redactionCounters)
+  const input = classifierInput(raw, policy.redactionRules, redactionCounters)
   if (input === null) return { decision: 'deny', withholdReason: 'its redacted text could not be cut into screen windows' }
   if (input.length === 0) return { decision: 'pass' }
   const plan = planWindows(input)
@@ -484,6 +549,8 @@ async function sessionStartHook($: any, e: any, next: any) {
   for (const warning of checkPosture({ merged, policy }, PLUGIN_NAME, mcpAllowlist)) {
     statusLines.push('barmkin posture: ' + warning)
   }
+  const rootPolicy = await currentPolicy($)
+  if (rootPolicy.state === 'invalid') statusLines.push('barmkin policy: ' + describePolicy(rootPolicy))
 
   // Register now, so the first tool call does not wait for it. A failure is
   // reported here and retried by the first request that needs the session.
@@ -570,7 +637,7 @@ async function promptSubmitHook($: any, e: any, next: any) {
     return { drop: 'barmkin: your message is longer than the 16 KiB scan limit, so it was withheld' }
   }
   // Detection runs on the scrubbed view; the original text is forwarded unless a secret is redacted.
-  const { text, redactedCount } = redactInEitherView(e.text)
+  const { text, redactedCount } = redactInEitherView(e.text, await enforcedPolicy($))
   if (redactedCount === 0) return next(e)
   if (text === WITHHELD_TEXT) {
     return { drop: 'barmkin: your message could not be fully scanned after redaction, so it was withheld' }
@@ -669,7 +736,8 @@ async function toolCheckGuardHook($: any, e: any, next: any) {
 
   const call: EgressCall = { tool: e.tool, input }
   if (isInlineSkillShell(e.tool_use_id)) {
-    const reason = inlineShellDenyReason(call)
+    const policy = await enforcedPolicy($)
+    const reason = inlineShellDenyReason(call, policy.egressClasses, policy.secretPathPatterns)
     if (reason) return { decision: 'deny', reason }
   }
   // Second line for an ordinary call: the same egress verdict the tool.call
@@ -742,14 +810,14 @@ function readImageBase64(e: any, result: any): string | undefined {
 // Decodes an image payload that already passed the per-string cap and runs the
 // rules over its bytes, so a secret in a plaintext file with an image extension
 // is caught. The base64 text itself also goes through the normal redaction pass.
-function imagePayloadWithholdReason(base64: string): string | null {
+function imagePayloadWithholdReason(base64: string, policy: ActivePolicy): string | null {
   let bytes: string
   try {
     bytes = atob(base64)
   } catch {
     return 'this Read image payload is not valid base64'
   }
-  return containsAnySecret(bytes, REDACTION_RULES) ? 'this Read image payload contains a secret-shaped value' : null
+  return containsAnySecret(bytes, policy.redactionRules) ? 'this Read image payload contains a secret-shaped value' : null
 }
 
 // A result shows a scanned prefix only when its payload is text: cutting a
@@ -793,8 +861,9 @@ async function redactionHook($: any, e: any, next: any) {
     return { deny: 'barmkin: this tool result is larger than the redaction scan budget, so it was withheld. ' + PAGING_ADVICE }
   }
 
+  const policy = await enforcedPolicy($)
   const imageBase64 = readImageBase64(e, result)
-  const imageReason = imageBase64 === undefined ? null : imagePayloadWithholdReason(imageBase64)
+  const imageReason = imageBase64 === undefined ? null : imagePayloadWithholdReason(imageBase64, policy)
   if (imageReason) return { deny: 'barmkin: ' + imageReason + ', so it was withheld' }
 
   let changed = false
@@ -817,7 +886,7 @@ async function redactionHook($: any, e: any, next: any) {
   const redactValue = (value: unknown): unknown => {
     if (typeof value === 'string') {
       if (showPrefix && exceedsScanLimit(value)) {
-        const prefix = scannedPrefix(value, REDACTION_RULES, redactionCounters)
+        const prefix = scannedPrefix(value, policy.redactionRules, redactionCounters)
         if (prefix === null) {
           noSafeCut = true
           return value
@@ -830,7 +899,7 @@ async function redactionHook($: any, e: any, next: any) {
       }
       const scrubbed = scrubInvisible(value)
       hiddenCount += scrubbed.hiddenCount
-      const { text: redacted, redactedCount } = redactInEitherView(value)
+      const { text: redacted, redactedCount } = redactInEitherView(value, policy)
       redactionHits += redactedCount
       if (redactedCount === 0 && scrubbed.strippedCount === 0) return value
       changed = true
@@ -853,7 +922,7 @@ async function redactionHook($: any, e: any, next: any) {
       if (typeof c !== 'string') return c
       const scrubbed = scrubInvisible(c)
       hiddenCount += scrubbed.hiddenCount
-      const { text: redacted, redactedCount } = redactInEitherView(c)
+      const { text: redacted, redactedCount } = redactInEitherView(c, policy)
       redactionHits += redactedCount
       if (redactedCount > 0 || scrubbed.strippedCount > 0) changed = true
       return redacted
@@ -933,7 +1002,7 @@ async function sessionSendHook($: any, e: any, next: any) {
     return { isDelivered: false, reason: 'barmkin: message withheld, it is longer than the 16 KiB scan limit' }
   }
   // Detection runs on the scrubbed view; the original text is delivered when no secret is found.
-  if (containsSecretInEitherView(e.text, REDACTION_RULES)) {
+  if (containsSecretInEitherView(e.text, (await enforcedPolicy($)).redactionRules)) {
     return { isDelivered: false, reason: 'barmkin: message withheld, it appears to contain a secret' }
   }
   return next(e)
@@ -986,7 +1055,7 @@ async function skillPromptHook($: any, e: any, next: any) {
     return { ...(current ?? e), text: skillBodyWithheldText(verdict.withholdReason) }
   }
 
-  const { text: redacted, redactedCount } = redactInEitherView(text)
+  const { text: redacted, redactedCount } = redactInEitherView(text, await enforcedPolicy($))
   if (redacted === WITHHELD_TEXT) {
     return { ...(current ?? e), text: skillBodyWithheldText('the redacted body exceeds the 256 KiB scan limit') }
   }
@@ -1129,6 +1198,7 @@ async function statusCommandHook($: any) {
       (egress ? '; last ' + egress.decision + ': ' + egress.classIds.join(', ') + ' via ' + egress.tool + ' (' + egress.rule + ')' : ''),
     'classifier: ' + (answer.ok ? answer.value.classifier : await read($, classifierState)) + ' (screened by the monitor)',
     screen ? 'last screen: ' + screen.decision + ' for ' + screen.label + ' (' + describeScores(screen.scores) + (screen.gap !== 'none' ? '; gap ' + screen.gap : '') + ')' : 'last screen: none yet',
+    'policy: ' + describePolicy(await currentPolicy($)),
   ]
   return { text: lines.join('\n') }
 }

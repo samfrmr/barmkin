@@ -42,6 +42,17 @@ The guard keeps no taint of its own. Every OpenCode session registers with the m
 
 Locally, without the monitor, the guard keeps secret redaction and the invisible-text scrub, prompt redaction, the MCP description neutraliser and server allowlist, the skill-listing neutraliser, the posture line and the status channel to the TUI half (`tui.tsx`, `/barmkin-status`).
 
+### The root policy
+
+The guard reads barmkin's [root policy](../../README.md#root-policy-etcbarmkinpolicyyaml) at `/etc/barmkin/policy.yaml` when OpenCode loads it. It reads no other path, and no option or environment variable changes the path. The policy can only add to the built-in rules: redaction rules, injection phrases, secret paths and outward-effect commands. The Claude Code shim reads the same file, with the same parser and the same checks (`plugins/claude-code/barmkin-shim/hooks/lib/policy.ts`).
+
+The guard reads the file with Node's file API, so it checks more than the Claude Code shim can (`src/policy-file.ts`). Root must own the file and every directory above it, and no group or other user may write any of them. The file must not be a symbolic link, must resolve to itself, and must be a regular UTF-8 file of at most 64 KiB. The guard opens it without following a link and checks it again through the open descriptor.
+
+- **No file:** the built-in rules apply alone.
+- **A policy that does not check, or a file the guard refuses:** the guard does not apply any of it. It sends the monitor nothing, so every guarded call is denied, and local redaction keeps the built-in rules. A posture line names the reason.
+
+A changed policy takes effect when OpenCode next loads the plugin. `tests/policy.spec.ts` runs the Claude Code shim's policy fixtures through this guard, and `tests/policy-file.spec.ts` runs the file checks on real files.
+
 | Environment variable | Description |
 |---|---|
 | `BARMKIN_MONITOR_SOCKET` | the monitor's Unix socket (required) |

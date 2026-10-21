@@ -1,0 +1,53 @@
+# barmkin root policy: /etc/barmkin/policy.yaml
+#
+# Root owns this file (mode 0644) and the barmkin shims read it: the Claude
+# Code shim once per Claude Code process, the OpenCode shim when OpenCode loads
+# it. A sandbox cannot write /etc, so the shims trust this path and no other.
+#
+# The policy can only add to barmkin's built-in rules. Each list below is
+# appended after the built-in list it extends:
+#
+#   redaction          secret shapes to redact from prompts, tool results,
+#                      skill bodies and screen windows (a match also raises
+#                      the sensitive leg)
+#   injection_phrases  phrases that raise the screen's local injection score
+#   secret_paths       paths that raise the sensitive leg when a call names them
+#   outward_commands   shell commands to treat as outward-effect (shell-outward)
+#
+# Nothing here can turn a built-in rule off, replace one, allow around one,
+# clear a taint, or change the monitor, the managed gate or the egress
+# decision. An unknown key, or anything else that does not check, makes the
+# whole file invalid, and the shims then deny every step they guard until
+# root fixes it. With no file at all, the built-in rules apply alone.
+#
+# Each entry has a name (lowercase letters, digits and hyphens), a pattern, an
+# example the pattern must match, and optionally `ignore_case: true`. A
+# redaction entry also has a category, which names its placeholder
+# ([REDACTED:<category>#n]). A pattern is a regular expression in a narrow
+# syntax: literals, `.`, \d \w \s and their negations, [...] classes, ^ $ \b
+# \B, (?:...) groups and | alternation, and repetition with an upper bound
+# (`?`, {n} or {n,m}, at most 256) on a single character or class. No `*`,
+# `+` or {n,}, no repeated groups, backreferences or lookaround. Bounds: 32
+# entries per list, patterns of 256 characters, and a cost for each pattern
+# (its longest match times its backtracking paths) of at most 256, and 512 for
+# a list. Write patterns in single quotes; a single quote inside is ''.
+#
+# For example:
+#
+#   redaction:
+#     - name: acme-token
+#       category: acme-token
+#       pattern: '\bacme_[A-Za-z0-9]{32}\b'
+#       example: 'acme_0123456789abcdefABCDEF0123456789'
+#   secret_paths:
+#     - name: vault-token
+#       pattern: '\.vault-token\b'
+#       example: '/root/.vault-token'
+#
+# The default below adds nothing, so the built-in behaviour holds exactly.
+
+version: 1
+redaction: []
+injection_phrases: []
+secret_paths: []
+outward_commands: []

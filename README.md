@@ -238,6 +238,7 @@ Managed settings lock every Claude Code user on the machine, so install the seat
 | Binary | `/usr/local/bin/barmkin`, built static | the Nix store |
 | Shim marketplace | `/opt/barmkin/plugins/claude-code` | the Nix store |
 | Managed settings | `/etc/claude-code/managed-settings.json`, root's, `0644` | the same |
+| [Root policy](#root-policy-etcbarmkinpolicyyaml) | `/etc/barmkin/policy.yaml` from `packaging/policy.yaml`, root's, `0644`, in a root-owned `0755` directory | the same, from `services.barmkin.policy`, as a copy rather than a link into the store |
 
 The unit runs as `barmkin:barmkin-clients`. systemd creates `/run/barmkin` (`0750`, holding `monitor.sock`) and `/var/lib/barmkin` (`0700`, holding the journal). `Restart=always` brings the monitor back after a crash, and every known lineage then returns tainted by `monitor_restart`. The unit drops every capability, keeps the file system read-only outside those two directories, allows only Unix sockets and filters system calls. The installed managed settings pin the gate to the `barmkin` uid.
 
@@ -250,7 +251,7 @@ sudo packaging/install.sh install --client "$USER"   # log in again to take the 
 sudo packaging/install.sh uninstall
 ```
 
-`make managed-install` and `make managed-uninstall` do the same without `--client`. `install --admin-socket` also installs the opt-in [administrative socket](#administrative-clear-opt-in), and `install` without it removes the socket. `install` is idempotent. It restarts the monitor cleanly when the binary or unit changes, and it refuses to replace managed settings it did not write. `uninstall` removes everything `install` created.
+`make managed-install` and `make managed-uninstall` do the same without `--client`. `install --admin-socket` also installs the opt-in [administrative socket](#administrative-clear-opt-in), and `install` without it removes the socket. `install` is idempotent. It restarts the monitor cleanly when the binary or unit changes, and it refuses to replace managed settings it did not write. `install` writes the default root policy when there is none, updates a default nobody has edited, keeps one root has edited (making it root's, `0644`), and refuses a symlinked policy path. `uninstall` removes everything `install` created, except managed settings it did not write and a policy root has edited.
 
 **NixOS:**
 
@@ -260,6 +261,65 @@ services.barmkin = { enable = true; clients = [ "alice" ]; };
 ```
 
 Then start `claude` as a member of `barmkin-clients`. `/barmkin-status` shows the legs and the monitor's state. Stop the monitor, or turn the shim off in the managed settings, to see every tool call denied.
+
+### Root policy (`/etc/barmkin/policy.yaml`)
+
+Both successor shims, for Claude Code and for OpenCode, read one policy file that root writes: `/etc/barmkin/policy.yaml`. It lets an operator add to the shims' built-in rules without rebuilding them. It is a separate file from the legacy `barmkin eval` rules in `/etc/barmkin/rules.yaml`, and the monitor does not read it.
+
+**The trust boundary is `/etc`.** On the managed seats, users may be root inside their sandboxes, but AppArmor keeps every sandboxed process, its root included, from writing `/etc`. So the shims trust this one path and nothing else. No option, environment variable or other path can point them at another policy, and they refuse a symbolic link, so a link to a user-writable file does not work either. barmkin does not ship the AppArmor profile: the sandbox's profile must deny writes, links and renames under `/etc/barmkin` to everything in the sandbox, and still let it read the policy. Each shim checks what its host lets it see:
+- **Claude Code shim.** It reads the file through `$.fs`. The path must not be a symbolic link, must resolve to itself (no linked directory above it) and must be a regular file of at most 64 KiB. `$.fs` reports no owner or mode, so on this seat root's ownership of the file comes from the packaging and AppArmor.
+- **OpenCode shim** (`shims/opencode/src/policy-file.ts`). It also checks that root owns the file, `/`, `/etc` and `/etc/barmkin`, and that no group or other user can write any of them. It opens the file without following a link and checks it again through the open descriptor.
+
+**It can only add.** The policy has four lists, and each is appended after the built-in list it extends:
+
+| List | What an entry adds |
+|---|---|
+| `redaction` | a secret shape, redacted as `[REDACTED:<category>#n]` from prompts, tool results, skill bodies and screen windows; a match also raises the sensitive leg |
+| `injection_phrases` | a phrase that counts as one more hit in the screen's local injection score |
+| `secret_paths` | a path that raises the sensitive leg when a call names it |
+| `outward_commands` | a shell command that joins the `shell-outward` egress class |
+
+The policy cannot turn off, replace or reorder a built-in rule, or allow around one. An entry cannot take a built-in rule's name, and the schema has no allow, disable or override key. Taint, egress decisions, the monitor peer, the managed gate and sticky legs are not in it at all. An unknown key makes the whole file invalid.
+
+**Schema and bounds.** [`packaging/policy.yaml`](packaging/policy.yaml), the packaged default, adds nothing and documents the schema. In short:
+- `version: 1`.
+- Each entry has a `name`, a `pattern`, an `example` the pattern must match, and optionally `ignore_case: true`. A `redaction` entry also has a `category`.
+- The file is a small YAML subset: flat lists of flat mappings, `[]` for an empty list, plain or quoted values and comments. Anchors, tags, flow collections, block scalars, more than one document, tabs, duplicate keys and YAML 1.1 words (`yes`, `no`, `on`, `off`, `null`) are refused.
+- Patterns are regular expressions in a narrow syntax. Repetition needs an upper bound of at most 256, and only a single character or class may repeat: no `*`, `+`, `{n,}` or repeated groups. Backreferences, lookaround and named groups are not accepted, and a pattern may not match empty text.
+- The file is at most 64 KiB, with at most 32 entries per list and 256 characters per pattern.
+- Each pattern has a cost: its longest match times its backtracking paths. The limit is 256 per pattern and 512 per list. `tests/policy-budget.test.ts` runs the most expensive redaction lists the bounds allow against text built to slow them down, and holds them to the built-in rules' 800 ms per MiB.
+
+**A missing policy keeps the built-in behaviour.** With no file, the shims apply only their built-in rules, and `/barmkin-status` says so.
+
+**An invalid policy fails closed.** This covers a policy that does not parse or check, and a file that is refused or unreadable. The shim never applies part of it. It sends the monitor nothing (`policy_invalid`), so every step the monitor guards is denied:
+- on Claude Code, the managed gate denies every call, because the shim never registers the session;
+- on OpenCode, the guard denies every call itself.
+
+Local redaction keeps the built-in rules. On Claude Code, the invalid policy's line and reason appear as a session-start line and in `/barmkin-status`; on OpenCode, they appear in a posture line.
+
+**When it is read.** The Claude Code shim reads the policy once per Claude Code process, when it loads its hooks module. The OpenCode shim reads it when OpenCode loads the plugin. A change takes effect in the processes started after it.
+
+**Updating it.** Write the new file beside the old one and rename it into place, so no shim ever reads half a file:
+
+```bash
+sudo install -o root -g root -m 0644 my-policy.yaml /etc/barmkin/policy.yaml.new
+sudo mv /etc/barmkin/policy.yaml.new /etc/barmkin/policy.yaml
+```
+
+Then start a new Claude Code session, or restart OpenCode. `/barmkin-status` names what the policy adds. Try a new policy on a host nobody is using first: on every seat that loads it, a policy the shims refuse denies every guarded step until it is fixed. On NixOS, set `services.barmkin.policy = ./my-policy.yaml;` and switch. `packaging/install.sh install` keeps a policy root has edited.
+
+**Tests.** The policy suites in both shims run the same fixtures (`plugins/claude-code/barmkin-shim/tests/support/policy-fixtures.ts`):
+- `tests/policy.test.ts` and `tests/policy-shim.test.ts` in the Claude Code shim;
+- `tests/policy.spec.ts` and `tests/policy-file.spec.ts` in the OpenCode shim.
+
+They check that:
+- each shim reads the policy from the fixed path only;
+- the policy's additions reach redaction, the injection score, the sensitive leg and the egress classes;
+- the built-in rules still apply beside it, and loading it changes no built-in list;
+- a missing policy keeps the built-in behaviour;
+- every invalid policy and every refused file denies every guarded call and sends the monitor nothing.
+
+`plugins/claude-code/e2e/policy.test.ts` runs the same checks against a real monitor and the real gate.
 
 ## Development
 

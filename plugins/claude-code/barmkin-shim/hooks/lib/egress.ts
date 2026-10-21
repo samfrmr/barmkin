@@ -687,15 +687,29 @@ export function classifyEgress(call: EgressCall, classes: readonly EgressClass[]
   return classes.filter((c) => toolMatches(c.tools, call.tool) && (c.match ? c.match(call) : true))
 }
 
+// `classes` with the shell-outward class widened by the root policy's
+// outward-effect commands (policy.ts). The built-in match still runs first and
+// every other class is kept as it is, so the policy only adds calls to the class.
+export function widenShellOutward(extra: readonly RegExp[], classes: readonly EgressClass[] = EGRESS_CLASSES): EgressClass[] {
+  if (extra.length === 0) return [...classes]
+  const added = commandMatches(extra)
+  return classes.map((c) => {
+    if (c.id !== 'shell-outward') return c
+    const builtin = c.match
+    return { ...c, match: (call: EgressCall) => (builtin ? builtin(call) : true) || added(call) }
+  })
+}
+
 // Whether a call names a secret path: a file argument, or any part of a shell
-// command. This is the "B" leg's path source.
-export function touchesSecretPath(call: EgressCall): boolean {
+// command. This is the "B" leg's path source. `extra` holds the root policy's
+// secret paths (policy.ts), checked after the built-in ones.
+export function touchesSecretPath(call: EgressCall, extra: readonly RegExp[] = []): boolean {
   const values: string[] = []
   for (const key of ['command', 'file_path', 'notebook_path', 'path']) {
     const value = call.input[key]
     if (typeof value === 'string') values.push(value.replace(/\\/g, '/'))
   }
-  return values.some((value) => SECRET_PATH_PATTERNS.some((re) => re.test(value)))
+  return values.some((value) => SECRET_PATH_PATTERNS.some((re) => re.test(value)) || extra.some((re) => re.test(value)))
 }
 
 // ---------------------------------------------------------------------------
@@ -824,15 +838,20 @@ export function isInlineSkillShell(toolUseId: unknown): boolean {
 // Always-on policy for a command run by inline skill shell, whatever the
 // taint state: no outward-effect command and no secret-bearing path. Returns
 // the deny reason, or null when the command is left to the permission layer.
-export function inlineShellDenyReason(call: EgressCall): string | null {
+// `classes` and `secretPaths` carry the root policy's additions (policy.ts).
+export function inlineShellDenyReason(
+  call: EgressCall,
+  classes: readonly EgressClass[] = EGRESS_CLASSES,
+  secretPaths: readonly RegExp[] = [],
+): string | null {
   const tail =
     ' Inline skill shell runs without you or the model approving it. ' +
     'Ask the user to run the command themselves, or to have the skill call it through the Bash tool.'
-  const shellHit = classifyEgress(call).find((c) => SHELL_EGRESS_CLASS_IDS.includes(c.id))
+  const shellHit = classifyEgress(call, classes).find((c) => SHELL_EGRESS_CLASS_IDS.includes(c.id))
   if (shellHit) {
     return 'barmkin: a skill\'s inline shell tried to run ' + shellHit.description + ', so it was denied.' + tail
   }
-  if (touchesSecretPath(call)) {
+  if (touchesSecretPath(call, secretPaths)) {
     return 'barmkin: a skill\'s inline shell tried to read a credential path, so it was denied.' + tail
   }
   return null

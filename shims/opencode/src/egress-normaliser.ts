@@ -51,6 +51,12 @@ export const CODEMODE_EGRESS_CLASS: EgressClass = {
 
 export const OPENCODE_EGRESS_CLASSES: readonly EgressClass[] = [...EGRESS_CLASSES, CODEMODE_EGRESS_CLASS]
 
+// The OpenCode classes over another base set: the root policy's (its
+// ActivePolicy.egressClasses), whose shell-outward class it may have widened.
+export function opencodeEgressClasses(base: readonly EgressClass[]): readonly EgressClass[] {
+  return [...base, CODEMODE_EGRESS_CLASS]
+}
+
 // ---------------------------------------------------------------------------
 // Tool id and argument re-keying.
 // ---------------------------------------------------------------------------

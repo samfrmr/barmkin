@@ -14,6 +14,8 @@
 #     (checks.sh admin), that installing again changes nothing, and that a
 #     SIGKILL restart keeps it; then opts out again and checks it is gone;
 #   - checks that install refuses managed settings it did not write;
+#   - checks that install keeps a policy root has edited (owner and mode put
+#     right), that uninstall leaves it, and that install refuses a symlink;
 #   - uninstalls, twice, and checks that nothing is left (checks.sh absent);
 #   - installs once more and checks again.
 # Needs docker and go; exits 77 without them. Exits non-zero on the first
@@ -119,6 +121,29 @@ EOF
 	echo "ok   - uninstall leaves them in place"
 	run_in rm /etc/claude-code/managed-settings.json
 	run_in rmdir /etc/claude-code
+	run_in /src/packaging/test/checks.sh absent
+
+	step "a policy root has edited, and a symlinked one"
+	run_in /src/packaging/install.sh install --binary /build/barmkin --client alice
+	run_in sh -c "printf 'version: 1\\nsecret_paths: []\\n' >/etc/barmkin/policy.yaml && chmod 0600 /etc/barmkin/policy.yaml"
+	run_in /src/packaging/install.sh install --binary /build/barmkin --client alice
+	[[ $(run_in stat -c '%U:%G %a' /etc/barmkin/policy.yaml) == "root:root 644" ]] ||
+		{ echo "FAIL: install did not make the edited policy root's, mode 0644" >&2; exit 1; }
+	[[ $(run_in cat /etc/barmkin/policy.yaml) == $'version: 1\nsecret_paths: []' ]] ||
+		{ echo "FAIL: install replaced a policy root had edited" >&2; exit 1; }
+	echo "ok   - install keeps an edited policy and makes it root's, mode 0644"
+	out=$(run_in /src/packaging/install.sh uninstall)
+	[[ $out == *"left /etc/barmkin/policy.yaml in place"* ]] ||
+		{ echo "FAIL: uninstall removed a policy root had edited: $out" >&2; exit 1; }
+	echo "ok   - uninstall leaves it in place"
+	run_in sh -c 'rm /etc/barmkin/policy.yaml && ln -s /tmp/policy.yaml /etc/barmkin/policy.yaml'
+	if out=$(run_in /src/packaging/install.sh install --binary /build/barmkin 2>&1); then
+		echo "FAIL: install accepted a symlinked policy" >&2
+		exit 1
+	fi
+	echo "ok   - install refuses: ${out##*$'\n'}"
+	run_in /src/packaging/install.sh uninstall
+	run_in rm -r /etc/barmkin
 	run_in /src/packaging/test/checks.sh absent
 
 	step "install, uninstall, uninstall again"
