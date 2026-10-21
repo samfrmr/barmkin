@@ -61,7 +61,7 @@ func (p *Proxy) serveForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := p.cfg.Upstream + singleJoiningSlash(r.URL.Path)
+	target := p.cfg.Upstream + singleJoiningSlash(r.URL.EscapedPath())
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}

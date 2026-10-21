@@ -197,3 +197,18 @@ func TestHealthEndpointRefusesNonGet(t *testing.T) {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusMethodNotAllowed)
 	}
 }
+
+func TestServeForwardKeepsEncodedPathEncoded(t *testing.T) {
+	var gotURI string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.RequestURI
+	}))
+	defer upstream.Close()
+
+	p := newTestProxy(t, upstream.URL)
+	doRequest(t, p, "GET", "/api/v1/chat%3Fx=1%23y%2Fz", "", nil)
+
+	if gotURI != "/api/v1/chat%3Fx=1%23y%2Fz" {
+		t.Errorf("upstream request URI = %q, want the encoded path unchanged", gotURI)
+	}
+}

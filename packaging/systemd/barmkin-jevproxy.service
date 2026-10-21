@@ -4,7 +4,8 @@
 #
 # Installed by packaging/install.sh install --jev-proxy (as
 # /etc/systemd/system/barmkin-jevproxy.service). systemd, as root, creates
-# /run/barmkin-jevproxy (root:root, 0750) holding jevproxy.sock. The
+# /run/barmkin-jevproxy (root:barmkin-jev-clients, 0750, so the caller group can reach
+# the socket) holding jevproxy.sock. The
 # operator provisions the key file themselves, out of band: root-owned,
 # mode 0600, at the path -key names (default /etc/barmkin/jev-openrouter.key).
 # The proxy checks this layout at every start and refuses to serve without
@@ -21,6 +22,7 @@ Type=simple
 ExecStart=/usr/local/bin/barmkin jev-proxy -socket /run/barmkin-jevproxy/jevproxy.sock -key /etc/barmkin/jev-openrouter.key -caller-group barmkin-jev-clients
 RuntimeDirectory=barmkin-jevproxy
 RuntimeDirectoryMode=0750
+ExecStartPre=+/bin/chgrp barmkin-jev-clients /run/barmkin-jevproxy
 UMask=0077
 
 # A crash or SIGKILL restarts the proxy. It holds no state across a
