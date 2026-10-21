@@ -40,8 +40,10 @@ RestartSec=1s
 # is no IP range to allow-list at the cgroup firewall. The Go dial guard
 # (internal/jevproxy's host pin) is the boundary that keeps every
 # connection this process opens on exactly that one pinned host and port.
+# CAP_CHOWN is the one capability kept: listen() chgrps the socket to the
+# caller group, which root is not a member of.
 NoNewPrivileges=yes
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_CHOWN
 AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=yes
