@@ -1,0 +1,67 @@
+# barmkin jev-proxy, root-owned: the only process that reads the
+# OpenRouter API key, so no agent-uid component (including the barmkin
+# monitor) ever holds it.
+#
+# Installed by packaging/install.sh install --jev-proxy (as
+# /etc/systemd/system/barmkin-jevproxy.service). systemd, as root, creates
+# /run/barmkin-jevproxy (root:root, 0750) holding jevproxy.sock. The
+# operator provisions the key file themselves, out of band: root-owned,
+# mode 0600, at the path -key names (default /etc/barmkin/jev-openrouter.key).
+# The proxy checks this layout at every start and refuses to serve without
+# it.
+
+[Unit]
+Description=barmkin Jev proxy (OpenRouter)
+Documentation=https://github.com/samfrmr/barmkin#packaging
+# The key must exist before the proxy can start.
+ConditionPathExists=/etc/barmkin/jev-openrouter.key
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/barmkin jev-proxy -socket /run/barmkin-jevproxy/jevproxy.sock -key /etc/barmkin/jev-openrouter.key -caller-group barmkin-jev-clients
+RuntimeDirectory=barmkin-jevproxy
+RuntimeDirectoryMode=0750
+UMask=0077
+
+# A crash or SIGKILL restarts the proxy. It holds no state across a
+# restart: there is nothing to replay.
+Restart=always
+RestartSec=1s
+
+# The proxy only listens on its Unix socket, dials the one pinned upstream
+# host over TLS, and reads its key file. It runs as root (it is the only
+# process that may read the 0600 key), so this unit does not drop to a
+# service user; everything else is locked down instead.
+#
+# AF_INET and AF_INET6 are required here, unlike the monitor's unit: the
+# upstream is a real Internet host (openrouter.ai), not loopback, so there
+# is no IP range to allow-list at the cgroup firewall. The Go dial guard
+# (internal/jevproxy's host pin) is the boundary that keeps every
+# connection this process opens on exactly that one pinned host and port.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @setuid @clock @module @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

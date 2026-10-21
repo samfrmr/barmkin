@@ -4,6 +4,7 @@
 # module in packaging/nixos instead.
 #
 #   packaging/install.sh install [--binary PATH] [--client USER]... [--admin-socket]
+#                                [--jev-proxy] [--jev-caller USER]...
 #   packaging/install.sh uninstall
 #   packaging/install.sh render-settings --monitor-uid UID
 #
@@ -28,14 +29,25 @@
 #     packaging/policy.yaml when there is none, root-owned with mode 0644 in a
 #     root-owned 0755 /etc/barmkin. A policy root has edited is kept as it is
 #     (its owner and mode are put right); an unedited default is updated.
+#   - only with --jev-proxy: creates the system group barmkin-jev-clients,
+#     adds each --jev-caller user to it, and installs and starts
+#     packaging/systemd/barmkin-jevproxy.service, the root-owned proxy that
+#     holds the OpenRouter API key for Jev calls so no agent-uid component
+#     does (see "Jev proxy" in README.md). It does NOT provision the key
+#     file: create /etc/barmkin/jev-openrouter.key yourself, root-owned,
+#     mode 0600, before the unit can start (ConditionPathExists refuses it
+#     otherwise). Without --jev-proxy, install removes the unit and group if
+#     an earlier install put them there; it never removes the key file.
 # Running it again changes nothing that is already in place. It refuses to
 # replace managed settings it did not write, and a policy path or directory
 # that is a symlink.
 #
 # uninstall, as root, stops and removes the service, the administrative
 # socket, its state and runtime directories, the files above, the user and
-# the group. It leaves managed settings it did not write, and a policy root
-# has edited, in place. Running it again is a no-op.
+# the group. It also removes the Jev proxy unit, group and runtime
+# directory if present, but never the key file. It leaves managed settings
+# it did not write, and a policy root has edited, in place. Running it
+# again is a no-op.
 #
 # render-settings prints the managed settings install would write for a
 # monitor running as UID.
@@ -66,6 +78,13 @@ readonly policy_dir=/etc/barmkin
 readonly policy=$policy_dir/policy.yaml
 readonly policy_default=$repo/packaging/policy.yaml
 readonly policy_record=$prefix/policy.sha256
+
+readonly jev_caller_group=barmkin-jev-clients
+readonly jevproxy_unit_name=barmkin-jevproxy.service
+readonly jevproxy_unit=/etc/systemd/system/$jevproxy_unit_name
+readonly jevproxy_runtime_dir=/run/barmkin-jevproxy
+readonly jevproxy_socket=$jevproxy_runtime_dir/jevproxy.sock
+readonly jev_key=$policy_dir/jev-openrouter.key
 
 say() { echo "[barmkin] $*"; }
 die() { echo "[barmkin] error: $*" >&2; exit 1; }
@@ -180,6 +199,65 @@ remove_admin() {
 	return $removed
 }
 
+# install_jevproxy: the root-owned Jev proxy unit and its caller group.
+# Never touches the key file: the operator provisions it out of band.
+# Succeeds only when something changed; the caller reloads and restarts.
+install_jevproxy() {
+	local c changed=1
+	getent group "$jev_caller_group" >/dev/null || { groupadd --system "$jev_caller_group"; say "group $jev_caller_group created"; }
+	for c in "${jev_callers[@]}"; do
+		id -u "$c" >/dev/null 2>&1 || die "no such user: $c"
+		if ! id -nG "$c" | tr ' ' '\n' | grep -qx "$jev_caller_group"; then
+			usermod -aG "$jev_caller_group" "$c"
+			say "user $c added to $jev_caller_group (log in again to take it)"
+		fi
+	done
+	if put "$repo/packaging/systemd/$jevproxy_unit_name" "$jevproxy_unit" 0644; then
+		say "unit → $jevproxy_unit"
+		changed=0
+	fi
+	if [[ ! -e $jev_key ]]; then
+		say "WARNING: $jev_key does not exist yet; create it root-owned, mode 0600, before the unit can start"
+	fi
+	return $changed
+}
+
+# remove_jevproxy: takes the Jev proxy away, stopping and removing its
+# unit, runtime directory and caller group. Never removes the key file.
+# Succeeds only when something was removed.
+remove_jevproxy() {
+	local removed=1
+	if [[ -e $jevproxy_unit ]] || systemctl cat "$jevproxy_unit_name" >/dev/null 2>&1; then
+		systemctl disable --now --quiet "$jevproxy_unit_name" 2>/dev/null || true
+	fi
+	if [[ -e $jevproxy_unit ]]; then
+		rm -f "$jevproxy_unit"
+		systemctl daemon-reload
+		removed=0
+	fi
+	systemctl reset-failed "$jevproxy_unit_name" 2>/dev/null || true
+	[[ -e $jevproxy_runtime_dir ]] && { rm -rf "$jevproxy_runtime_dir"; removed=0; }
+	if getent group "$jev_caller_group" >/dev/null; then
+		groupdel "$jev_caller_group"
+		removed=0
+	fi
+	return $removed
+}
+
+# wait_for_jevproxy: the proxy is up once it answers GET /healthz with ok
+# on its socket.
+wait_for_jevproxy() {
+	for _ in $(seq 100); do
+		if [[ -S $jevproxy_socket ]] && printf 'GET /healthz HTTP/1.0\r\n\r\n' |
+			timeout 2 socat -t 2 - "UNIX-CONNECT:$jevproxy_socket" 2>/dev/null | grep -q '"state":"ok"'; then
+			return 0
+		fi
+		sleep 0.1
+	done
+	systemctl --no-pager status "$jevproxy_unit_name" >&2 || true
+	die "the Jev proxy does not answer on $jevproxy_socket"
+}
+
 # check_policy_path: install stops, before it changes anything, at a policy
 # path the shims would refuse.
 check_policy_path() {
@@ -239,11 +317,14 @@ wait_for_monitor() {
 
 cmd_install() {
 	local binary=$repo/barmkin clients=() c gid restart=0 reload=0 admin=0 admin_changed=0
+	local jev_proxy=0 jev_callers=() jevproxy_changed=1 jevproxy_restart=0
 	while (($#)); do
 		case $1 in
 		--binary) binary=${2:?--binary needs a path}; shift 2 ;;
 		--client) clients+=("${2:?--client needs a user}"); shift 2 ;;
 		--admin-socket) admin=1; shift ;;
+		--jev-proxy) jev_proxy=1; shift ;;
+		--jev-caller) jev_callers+=("${2:?--jev-caller needs a user}"); shift 2 ;;
 		*) usage ;;
 		esac
 	done
@@ -252,6 +333,9 @@ cmd_install() {
 		die "the managed sandbox needs /usr/bin/bwrap and /usr/bin/socat: apt-get install -y bubblewrap socat"
 	[[ -f $binary && -x $binary ]] || die "no barmkin binary at $binary; build it with: CGO_ENABLED=0 go build -o barmkin ."
 	"$binary" monitor -h >/dev/null 2>&1 || die "$binary has no monitor subcommand"
+	if ((jev_proxy)); then
+		"$binary" jev-proxy -h >/dev/null 2>&1 || die "$binary has no jev-proxy subcommand"
+	fi
 	for c in "${clients[@]}"; do
 		id -u "$c" >/dev/null 2>&1 || die "no such user: $c"
 	done
@@ -308,6 +392,27 @@ cmd_install() {
 	fi
 	wait_for_monitor
 	say "monitor serving on $socket as $service_user"
+
+	if ((jev_proxy)); then
+		if install_jevproxy; then jevproxy_changed=0; fi
+		systemctl daemon-reload
+		systemctl enable --quiet "$jevproxy_unit_name"
+		if [[ -e $jev_key ]]; then
+			if ((jevproxy_changed == 0)) && systemctl is-active --quiet "$jevproxy_unit_name"; then
+				systemctl restart "$jevproxy_unit_name"
+				jevproxy_restart=1
+			elif ! systemctl is-active --quiet "$jevproxy_unit_name"; then
+				systemctl start "$jevproxy_unit_name"
+				jevproxy_restart=1
+			fi
+			if ((jevproxy_restart)); then wait_for_jevproxy; fi
+			say "Jev proxy serving on $jevproxy_socket as root"
+		else
+			say "Jev proxy unit installed but not started: provision $jev_key first, then systemctl start $jevproxy_unit_name"
+		fi
+	elif remove_jevproxy; then
+		say "Jev proxy removed"
+	fi
 }
 
 cmd_uninstall() {
@@ -324,6 +429,7 @@ cmd_uninstall() {
 	fi
 	systemctl reset-failed "$unit_name" 2>/dev/null || true
 	if remove_admin; then say "administrative socket removed"; fi
+	if remove_jevproxy; then say "Jev proxy removed (the key file, if any, was left in place)"; fi
 
 	if [[ -f $settings && ! -L $settings ]]; then
 		have=$(sha <"$settings")

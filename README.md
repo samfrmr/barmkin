@@ -13,6 +13,7 @@ Guardrails for AI coding agents, in two generations:
 - [Commands](#commands)
 - [Regex guardrail (`barmkin eval`)](#regex-guardrail-barmkin-eval)
 - [Monitor (`barmkin monitor`)](#monitor-barmkin-monitor)
+- [Jev proxy (`barmkin jev-proxy`)](#jev-proxy-barmkin-jev-proxy)
 - [Claude Code shim and managed gate](#claude-code-shim-and-managed-gate)
 - [OpenCode 2.x shim](#opencode-2x-shim)
 - [Packaging](#packaging)
@@ -31,6 +32,7 @@ stats      aggregate decisions from the log file
 gate       managed Claude Code PreToolUse check for shim presence, exit 0 or 2
 monitor    run the monitor service
 monitor-admin list|clear   root only: list monitor lineages, or clear one (see "Administrative clear (opt-in)")
+jev-proxy  run the root-owned Jev proxy (see "Jev proxy (barmkin jev-proxy)")
 version    print the version
 ```
 
@@ -193,6 +195,30 @@ ExecStart=/usr/local/bin/barmkin monitor -socket /run/barmkin/monitor.sock -stat
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ```
 
+## Jev proxy (`barmkin jev-proxy`)
+
+`barmkin jev-proxy` ([`internal/jevproxy`](internal/jevproxy)) is a root-owned loopback proxy that holds the OpenRouter API key for Jev calls, so no agent-uid component (the barmkin monitor included) ever holds it: the root-only central path.
+
+```
+barmkin jev-proxy [-socket /run/barmkin-jevproxy/jevproxy.sock] [-key /etc/barmkin/jev-openrouter.key]
+                  [-caller-group barmkin-jev-clients] [-upstream https://openrouter.ai]
+                  [-timeout 10s] [-max-body-bytes 1048576]
+```
+
+**It runs as root**, unlike the monitor: it is the only process that may read the key file, so there is no dedicated service user to drop to. Everything else about the deployment is locked down instead (see [Packaging](#packaging)).
+
+**Key custody.** `-key` names a file that must be a regular file (never a symlink), owned by root, mode exactly `0600`, non-empty after trimming whitespace, with no embedded newline. The proxy refuses to start otherwise. The key is never logged, journaled, exported or echoed: every internal path that could reach a log line wraps it in a `Secret`, whose formatting (`%v`, `%s`, `%q`, `%+v`, `%#v`) always prints `[REDACTED]`, the same posture the successor monitor's diagnostics already keep for other sensitive values.
+
+**Caller posture: no credential, the socket is the gate.** A caller authenticates only by connecting to `-socket`; it presents no key, bearer token or header of its own. Access control is the socket's Unix permissions: root-owned runtime directory, socket mode `0660`, group `-caller-group`. Add a process's user to that group to let it call through; nothing it sends is trusted as a credential, and any `Authorization`, `Proxy-Authorization` or `Cookie` header it sends is dropped, never forwarded.
+
+**Listener-uid pin.** A caller that wants to be sure it is talking to the real, root-owned proxy and not a same-uid impostor that raced it to the socket path dials with `jevproxy.DialPinned(ctx, socket, 0)`, which checks the listening process's kernel peer credentials (`SO_PEERCRED`) before sending anything, exactly as the monitor's own socket is pinned (`internal/client`, `internal/monitor`). This is the pattern from `data/barmkin-successor-systemone-proxy-scout/report.md`, applied to a Unix socket rather than a loopback TCP port.
+
+**Egress.** `-upstream` is pinned to exactly one base URL, `https://openrouter.ai` by default; only an `https` scheme and a bare `host[:port]` (no path, query, fragment or user info) are accepted. The proxy's transport dials only that host and port: nothing a caller sends, including an absolute-looking path or a `Host` header, can redirect a call anywhere else. It never follows a redirect the upstream sends; a `3xx` reply becomes `502 Bad Gateway` to the caller instead of being relayed or chased.
+
+**Pass-through.** A caller's method, path, query and body are forwarded unchanged; the proxy adds its own `Authorization: Bearer <key>` and a fixed `User-Agent`, and relays only `Content-Type` in each direction, dropping every other header. `GET /healthz` is reserved for a local, upstream-free health check (never forwarded, and it cannot collide with a real OpenRouter call, which is always under `/api/`), so a caller's own breaker can fail fast on an outage without waiting out a stalled upstream. `-timeout` bounds every call end to end (default 10s); `-max-body-bytes` bounds both the request and the response (default 1 MiB), so neither a flooding caller nor a hung or oversized upstream reply can hold the proxy open.
+
+**Pointing a caller at it.** No caller is wired in yet: the successor monitor's screen package (`internal/screen`) does not call `-jev-proxy` today (see the monitor's README note above). Point a future Jev caller here by giving it `-socket /run/barmkin-jevproxy/jevproxy.sock` (or the path your deployment chose) and the pinned uid `0`, and adding its service user to `-caller-group`.
+
 ## Claude Code shim and managed gate
 
 A managed Claude Code seat runs two pieces in every session, and both talk to the monitor:
@@ -252,6 +278,16 @@ sudo packaging/install.sh uninstall
 ```
 
 `make managed-install` and `make managed-uninstall` do the same without `--client`. `install --admin-socket` also installs the opt-in [administrative socket](#administrative-clear-opt-in), and `install` without it removes the socket. `install` is idempotent. It restarts the monitor cleanly when the binary or unit changes, and it refuses to replace managed settings it did not write. `install` writes the default root policy when there is none, updates a default nobody has edited, keeps one root has edited (making it root's, `0644`), and refuses a symlinked policy path. `uninstall` removes everything `install` created, except managed settings it did not write and a policy root has edited.
+
+**Jev proxy (Debian and Ubuntu only; there is no NixOS module for it yet):**
+
+```bash
+sudo install -o root -g root -m 0600 /dev/null /etc/barmkin/jev-openrouter.key
+sudo "$EDITOR" /etc/barmkin/jev-openrouter.key   # paste the OpenRouter API key, one line
+sudo packaging/install.sh install --jev-proxy --jev-caller barmkin   # add each caller's user
+```
+
+`install --jev-proxy` installs [`packaging/systemd/barmkin-jevproxy.service`](packaging/systemd/barmkin-jevproxy.service), the root-owned proxy unit from [Jev proxy (`barmkin jev-proxy`)](#jev-proxy-barmkin-jev-proxy), and the group `barmkin-jev-clients`; `--jev-caller USER` (repeatable) adds a user to it. It never provisions the key file: create `/etc/barmkin/jev-openrouter.key` yourself first, as above, since the unit refuses to start without one (`ConditionPathExists`). `install` without `--jev-proxy` removes the unit and group if an earlier install put them there, and `uninstall` always removes them; neither one ever touches the key file.
 
 **NixOS:**
 
