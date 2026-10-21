@@ -14,6 +14,7 @@
 //	barmkin monitor-admin
 //	                    Root's list and clear of monitor lineages over the
 //	                    opt-in administrative socket (see monitor_admin_cmd.go)
+//	barmkin jev-proxy   Run the root-owned Jev/OpenRouter proxy (see jevproxy_cmd.go)
 //	barmkin test        Run built-in test vectors
 //	barmkin validate    Check config: rule names, patterns, examples
 //	barmkin stats       Aggregate decisions from the log file
@@ -63,6 +64,8 @@ func main() {
 		cmdMonitor(rest)
 	case "monitor-admin":
 		cmdMonitorAdmin(rest)
+	case "jev-proxy":
+		cmdJevProxy(rest)
 	case "validate":
 		cmdValidate(configPath)
 	case "test":
@@ -337,6 +340,8 @@ Commands:
   monitor-admin list|clear
              Root only: list monitor lineages, or clear one from a terminal
              over the opt-in administrative socket
+  jev-proxy  Run the root-owned Jev/OpenRouter proxy [-socket PATH] [-key PATH]
+             [-caller-group NAME] [-upstream URL] [-timeout DURATION]
   validate   Validate config file
   test       Run test vectors (deny + allow)
   stats      Show statistics from log file

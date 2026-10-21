@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Daviey/barmkin/internal/jevproxy"
 	imonitor "github.com/Daviey/barmkin/internal/monitor"
 )
 
@@ -117,6 +118,53 @@ func TestPackagingAdminSocket(t *testing.T) {
 	}
 	if len(dropin) != 4 {
 		t.Errorf("the drop-in changes more than the socket and the command: %v", dropin)
+	}
+}
+
+// TestPackagingJevProxyUnit holds the shipped Jev proxy unit to the
+// deployment `barmkin jev-proxy` requires: it runs as root (no User=), at
+// the proxy's default socket, key path and caller group, in a root-created
+// runtime directory, with no credential or secret-like key in the unit
+// itself, and a restart after a crash.
+func TestPackagingJevProxyUnit(t *testing.T) {
+	unit := readUnit(t, "packaging/systemd/barmkin-jevproxy.service")
+	one := func(key string) string {
+		t.Helper()
+		if len(unit[key]) != 1 {
+			t.Fatalf("%s is set %d times, want once", key, len(unit[key]))
+		}
+		return unit[key][0]
+	}
+
+	if _, ok := unit["User"]; ok {
+		t.Errorf("the unit sets User=%v; it must run as root to read the 0600 key file", unit["User"])
+	}
+	for key, want := range map[string]string{
+		"RuntimeDirectory":     path.Base(path.Dir(jevproxy.DefaultSocket)),
+		"RuntimeDirectoryMode": "0750",
+		"UMask":                "0077",
+		"Restart":              "always",
+		"NoNewPrivileges":      "yes",
+	} {
+		if got := one(key); got != want {
+			t.Errorf("%s=%s, want %s", key, got, want)
+		}
+	}
+	if dir := path.Dir(jevproxy.DefaultSocket); dir != "/run/"+one("RuntimeDirectory") {
+		t.Errorf("the default socket's directory %s is not the unit's RuntimeDirectory", dir)
+	}
+	want := "/usr/local/bin/barmkin jev-proxy -socket " + jevproxy.DefaultSocket +
+		" -key " + jevproxy.DefaultKeyPath + " -caller-group " + jevproxy.DefaultCallerGroup
+	if got := one("ExecStart"); got != want {
+		t.Errorf("ExecStart=%s, want %s", got, want)
+	}
+	if got := one("ConditionPathExists"); got != jevproxy.DefaultKeyPath {
+		t.Errorf("ConditionPathExists=%s, want the default key path %s", got, jevproxy.DefaultKeyPath)
+	}
+	for _, key := range []string{"Environment", "LoadCredential", "SetCredential"} {
+		if unit[key] != nil {
+			t.Errorf("unit sets %s, which must never carry a key: %v", key, unit[key])
+		}
 	}
 }
 
